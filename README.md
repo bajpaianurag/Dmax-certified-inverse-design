@@ -1,6 +1,6 @@
 # Certified, ε‑Robust Inverse Design for Amorphous Alloys with Larger Casting Diameters
 
-This repository packages **scripts** for robust, conformal, Bayesian optimization–driven inverse design of alloy **Dmax** (maximum castable diameter). The code trains quantile models on log‑Dmax, applies **conformal calibration** and **composition‑jitter ε certification**, and then optimizes a **conservative lower bound** via **Bayesian optimization** (ET and GP backends).
+This repository packages **scripts** for robust, conformal, Bayesian optimization–driven inverse design of amorphous alloys **Dmax** (maximum castable diameter). The code trains quantile models on log‑Dmax, applies **conformal calibration** and **composition‑jitter ε certification**, and then optimizes a **conservative lower bound** via **Bayesian optimization** (ET and GP backends).
 
 ---
 
