@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it."
+title: "Robust inverse design for alloy Dmax (code release)"
+date-released: 2025-09-07
+authors:
+  - family-names: "YourSurname"
+    given-names: "YourName"
+repository-code: "https://github.com/your-org/your-repo"
+license: MIT
