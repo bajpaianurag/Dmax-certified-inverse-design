@@ -75,33 +75,7 @@ Place your dataset CSV in the repository root (default expected by your scripts)
 
 ---
 
-## Key artifacts (non‑exhaustive)
-
-From **Main_code.py** (training/calibration):
-- `project_output/reports/fig_bo_pass_counts_vs_threshold.png`
-- `project_output/reports/bo_multithreshold_summary_all.csv`
-- `project_output/reports/bo_multithreshold_summary_novel.csv`
-- `project_output/data/designed/advanced_bo_pool.csv`
-- `project_output/data/designed/advanced_pour_list_all_ge_<D>mm.csv`
-
-From inverse design:
-- `project_output/source_data/bo_trace_forest.csv`, `bo_trace_gp.csv`
-- `project_output/data/designed/bo_tried_all_<backend>.csv`
-- `project_output/data/designed/bo_prefiltered_<backend>.csv`
-- `project_output/data/designed/advanced_candidates_pred_ge_35mm_all_prethin.csv`
-- `project_output/data/designed/advanced_candidates_pred_ge_35mm_all.csv`
-- `project_output/data/designed/advanced_candidates_pred_ge_35mm_novel.csv`
-- `project_output/data/designed/advanced_bo_pool_<backend>.csv`
-- `project_output/reports/fig_bo_backend_bestL.png`
-- `project_output/reports/pred_gate_ablation.csv`
-- `project_output/reports/eps_sensitivity_top30.csv`
-- `project_output/reports/eps_sensitivity_summary.csv`
-- `project_output/reports/fig_eps_sensitivity.png`
-- `project_output/reports/fig_jitter_cloud_top1.png`
-- `project_output/reports/jitter_cloud_top1.csv`
-- `project_output/reports/element_constraints_summary.csv`
-
-See `docs/FIGURE_MAP.md` for a fuller map.
+## Key artifacts - See `docs/FIGURE_MAP.md` for a fuller map.
 
 ---
 
