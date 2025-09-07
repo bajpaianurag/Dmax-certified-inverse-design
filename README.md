@@ -36,7 +36,7 @@ README.md                 # this file
 .editorconfig, .gitattributes, .gitignore
 ```
 
-Outputs are written under `project_output/` (git‑ignored), mirroring the paths used in your scripts (e.g., `project_output/reports`, `project_output/source_data`, `project_output/data/designed`).
+Outputs are written under `project_output/`.
 
 ---
 
