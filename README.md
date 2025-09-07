@@ -27,9 +27,6 @@ docs/
   FIGURE_MAP.md           # where each figure/CSV is written (from the scripts)
   REPRODUCIBILITY.md      # notes on environment, seeds, manifests
 
-.github/workflows/
-  ci.yml                  # CI: install + run unit tests only
-
 run_all.sh                # one-command runner (pip + both scripts)
 Makefile                  # make setup | run | design | test
 requirements.txt          # pip environment
