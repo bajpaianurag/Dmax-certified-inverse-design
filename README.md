@@ -1,8 +1,6 @@
 # Certified, ε‑Robust Inverse Design for Alloy Dmax
 
-This repository packages your **exact scripts** for robust, conformal, Bayesian optimization–driven inverse design of alloy **Dmax** (maximum castable diameter). The code trains quantile models on log‑Dmax, applies **conformal calibration** and **composition‑jitter ε certification**, and then optimizes a **conservative lower bound** via **Bayesian optimization** (ET and GP backends). All artifacts (CSVs/figures) are written to disk for reproducibility and SI.
-
-> **Important:** The scripts under `scripts/` were copied **verbatim** from your originals to avoid any behavior change.
+This repository packages **scripts** for robust, conformal, Bayesian optimization–driven inverse design of alloy **Dmax** (maximum castable diameter). The code trains quantile models on log‑Dmax, applies **conformal calibration** and **composition‑jitter ε certification**, and then optimizes a **conservative lower bound** via **Bayesian optimization** (ET and GP backends).
 
 ---
 
@@ -16,8 +14,6 @@ This repository packages your **exact scripts** for robust, conformal, Bayesian 
 - **Exceedance reporting** vs dataset max (e.g., 35 mm) with **conservative CIs**.
 - **ε‑sensitivity** curves and **jitter‑cloud** diagnostics (plot + CSV).
 - **Baselines/ablations**: ET vs GP, prediction‑gate fixed vs adaptive.
-- **Reproducibility artifacts**: run manifests, BO traces, CSVs for all figures.
-- **Unit tests** for certification math (monotonicity & ε=0,K=1 consistency; safe fallback).
 
 ---
 
@@ -25,11 +21,7 @@ This repository packages your **exact scripts** for robust, conformal, Bayesian 
 
 ```
 scripts/
-  Main_code.py            # training + calibration and core utilities (verbatim)
-  Main_code (1).py        # inverse design / BO (verbatim)
-
-tests/
-  test_cert_objective.py  # optional, safe unit tests (dummy fallback if imports fail)
+  Main_code.py            # training + calibration and core utilities + inverse design
 
 docs/
   FIGURE_MAP.md           # where each figure/CSV is written (from the scripts)
@@ -43,7 +35,6 @@ Makefile                  # make setup | run | design | test
 requirements.txt          # pip environment
 environment.yml           # conda environment
 LICENSE                   # MIT
-CITATION.cff              # fill in your author/repo before release
 README.md                 # this file
 .editorconfig, .gitattributes, .gitignore
 ```
@@ -55,7 +46,7 @@ Outputs are written under `project_output/` (git‑ignored), mirroring the paths
 ## Quick start
 
 ```bash
-# (optional) create venv
+# create venv
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
@@ -96,7 +87,7 @@ From **Main_code.py** (training/calibration):
 - `project_output/data/designed/advanced_bo_pool.csv`
 - `project_output/data/designed/advanced_pour_list_all_ge_<D>mm.csv`
 
-From **Main_code (1).py** (inverse design):
+From inverse design:
 - `project_output/source_data/bo_trace_forest.csv`, `bo_trace_gp.csv`
 - `project_output/data/designed/bo_tried_all_<backend>.csv`
 - `project_output/data/designed/bo_prefiltered_<backend>.csv`
@@ -126,17 +117,6 @@ See `docs/FIGURE_MAP.md` for a fuller map.
 
 ---
 
-## Citation
-
-If you use this code, please cite the paper and this repository (see `CITATION.cff`). Update the author and repo URL before release.
-
 ## License
 
 MIT (see `LICENSE`).
-
----
-
-### Notes
-
-- The scripts are kept **unchanged** to preserve behavior. If you want a modular `src/` refactor, add it alongside these scripts and keep the originals for exact reproducibility.
-- Some outputs and file names are backend‑suffixed (`..._forest.csv`, `..._gp.csv`) to prevent collisions when running both BO backends.
