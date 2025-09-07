@@ -75,10 +75,6 @@ Place your dataset CSV in the repository root (default expected by your scripts)
 
 ---
 
-## Key artifacts - See `docs/FIGURE_MAP.md` for a fuller map.
-
----
-
 ## Reproducibility
 
 - **Environment:** `requirements.txt` (pip) or `environment.yml` (conda).
