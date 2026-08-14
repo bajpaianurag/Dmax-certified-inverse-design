@@ -53,6 +53,7 @@ plt.rcParams.update({
 })
 sns.set_theme(context="paper", style="whitegrid", font_scale=1.5)
 
+
 RESULTS_ROOT = Path(os.getenv("RESULTS_DIR", "/results"))
 OUTDIR = RESULTS_ROOT / "project_output"
 OUTDIR.mkdir(parents=True, exist_ok=True)
@@ -606,10 +607,6 @@ print(f"[Signature grid = {GRID_STEP_ATPCT} at.%] compositions: {df.shape[0]} ro
       f"{dup_stats.shape[0]} unique signatures; duplicates (count>1): {n_dups}")
 dup_stats.head(10)
 
-
-# In[9]:
-
-
 def heaping_report_plus(y, tol=5e-3):
     s = pd.to_numeric(y, errors="coerce").to_numpy()
     s = s[np.isfinite(s)]
@@ -680,10 +677,6 @@ with open(OUTDIR / "reports" / "heaping.json", "w") as f:
     json.dump(heap, f, indent=2)
 heap
 
-
-# In[10]:
-
-
 def plot_heaping_panels(y, out_png):
     s = pd.to_numeric(y, errors="coerce").to_numpy()
     s = s[np.isfinite(s)]
@@ -715,9 +708,6 @@ def plot_heaping_panels(y, out_png):
     plt.close()
 
 plot_heaping_panels(df[dmax_col], OUTDIR / "reports" / "heaping_panels.png")
-
-
-# In[11]:
 
 
 # EDA plots
@@ -822,9 +812,6 @@ ax.xaxis.set_major_formatter(mticker.StrMethodFormatter("{x:,.0f}"))
 add_percent_axis_top(ax, total_rows)
 sns.despine(left=False, bottom=False)
 savefig_both(FIGDIR / "solvent_family_counts_h.png")
-
-
-# In[12]:
 
 
 # Splits (random, family-out)
@@ -963,9 +950,6 @@ print("Random counts (rows):", summary["random_counts"])
 print("Family-out splits for families:", ", ".join(summary["family_out_keys"]) or "(none met threshold)")
 
 
-# In[13]:
-
-
 # UMAP of all compositions + dominant elements (>=25 at.%)
 SRC_DIR = OUTDIR / "source_data"
 SRC_DIR.mkdir(parents=True, exist_ok=True)
@@ -974,15 +958,20 @@ FIGDIR.mkdir(parents=True, exist_ok=True)
 
 # 1) Build UMAP on elemental fractions only
 X_all = df[elem_cols].to_numpy()
-reducer = umap.UMAP(
-    random_state=SEED,
-    n_neighbors=30,
-    min_dist=0.1,
-    metric="manhattan"
-)
-Z = reducer.fit_transform(X_all)  # shape (n_samples, 2)
+if HAS_UMAP:
+    reducer = umap.UMAP(
+        random_state=SEED,
+        n_neighbors=30,
+        min_dist=0.1,
+        metric="manhattan"
+    )
+    EMBED_METHOD = "UMAP"
+else:
+    reducer = PCA(n_components=2, random_state=SEED)
+    EMBED_METHOD = "PCA"
+Z = reducer.fit_transform(X_all)
 
-# 2) Dominant element(s): all elements with >=25 at.% (else top element)
+# 2) Dominant element(s)
 def dominant_elements(row, threshold=0.25):
     els = [el for el in elem_cols if row[el] >= threshold]
     if els:
@@ -1002,20 +991,15 @@ out_csv = SRC_DIR / "umap_alloys_with_coords_and_dominant_elements.csv"
 umap_out.to_csv(out_csv, index=False)
 print(f"Saved: {out_csv}")
 
-# 5) Optional quick scatter (all points, single color to avoid legend clutter)
+# 5) Scatter (all points, single color to avoid legend clutter)
 plt.figure(figsize=(6.4, 5.4))
 plt.scatter(umap_out["UMAP1"], umap_out["UMAP2"], s=14, alpha=0.85, edgecolors="none")
-plt.xlabel("UMAP 1"); plt.ylabel("UMAP 2")
-plt.title("UMAP of compositions (all data)")
+plt.xlabel(f"{EMBED_METHOD} 1"); plt.ylabel(f"{EMBED_METHOD} 2")
+plt.title(f"{EMBED_METHOD} of compositions (all data)")
 plt.tight_layout()
 
-# If you have your own helper; else use standard savefig:
-# savefig_both(FIGDIR / "umap_all_compositions.png")
 plt.savefig(FIGDIR / "umap_all_compositions.png", dpi=300, bbox_inches="tight")
 plt.close()
-
-
-# In[14]:
 
 
 # Feature engineering
@@ -1054,9 +1038,6 @@ def prop_vector(prop_dict, elems=elem_cols):
 RAD_VEC = prop_vector(RAD)
 EN_VEC  = prop_vector(EN)
 VEC_VEC = prop_vector(VEC)
-
-
-# In[15]:
 
 
 # Features builder
@@ -1153,7 +1134,6 @@ def build_features(df_or_arr, elem_cols):
            "delta_size": delta_size}
     return pd.DataFrame(out)
 
-# Add family if missing
 if "family" not in df.columns:
     comp = df[elem_cols].to_numpy()
     df["family"] = pd.Series(np.array(elem_cols)[comp.argmax(axis=1)], name="family")
@@ -1170,8 +1150,6 @@ if not np.isfinite(X_full.to_numpy()).all():
     raise ValueError("Non-finite values detected in engineered features (check descriptor tables and input).")
 
 X_COLUMNS = list(X_full.columns)
-
-# Parallel no-family feature set for ablations
 X_NOFAM_COLUMNS = list(X_engineered.columns)
 
 def make_features_no_family(X_comp):
@@ -1187,9 +1165,6 @@ def make_features_no_family(X_comp):
     if not np.isfinite(feats.to_numpy()).all():
         raise ValueError("Non-finite values in no-family inference features.")
     return feats
-
-
-# In[16]:
 
 
 def make_features_from_compositions(X_comp):
@@ -1225,9 +1200,6 @@ def make_features_from_compositions(X_comp):
         raise ValueError("Non-finite values detected in inference features.")
 
     return feats_full
-
-
-# In[17]:
 
 
 def _family_dummies_from_composition_matrix(X_comp):
@@ -1266,9 +1238,6 @@ def _family_dummies_from_composition_matrix(X_comp):
     if not np.isfinite(fam_dm.to_numpy()).all():
         raise ValueError("Non-finite values in family one-hots.")
     return fam_dm
-
-
-# In[18]:
 
 
 def robust_L_for_comps_hi(
@@ -1577,9 +1546,6 @@ with open(METRICS_DIR / "summary_training.json", "w") as f:
     json.dump(metrics, f, indent=2)
 
 
-# In[20]:
-
-
 # Figures
 FIGDIR = OUTDIR / "reports" / "figures"
 FIGDIR.mkdir(parents=True, exist_ok=True)
@@ -1805,7 +1771,7 @@ def comp_entropy_norm(row):
     if p.size == 0:
         return np.nan
     H = -np.sum(p * np.log(p))
-    return float(H / np.log(p.size))  # normalized to [0,1]
+    return float(H / np.log(p.size))
 
 H_test = np.apply_along_axis(comp_entropy_norm, 1, X_test_elem)
 df_H = pd.DataFrame({
@@ -1878,16 +1844,13 @@ bins_full = (
 bins_full["bin_left"]  = bins_full["bin"].apply(lambda iv: float(iv.left))
 bins_full["bin_right"] = bins_full["bin"].apply(lambda iv: float(iv.right))
 
-# ±1σ curves used in the figure
 bins_full["res_m1s"] = -bins_full["res_std"]
 bins_full["res_p1s"] = +bins_full["res_std"]
 
-# Raw scatter layer (Origin Layer 1)
 df_sc.loc[:, ["yhat_log", "res_log"]].rename(
     columns={"yhat_log": "pred_log", "res_log": "residual_log"}
 ).to_csv(SRC_DIR / "residual_vs_pred_log_bands_et_scatter.csv", index=False)
 
-# Binned summary (Origin Layers 2–4: median, IQR, ±1σ)
 bins_full.drop(columns=["bin"]).to_csv(
     SRC_DIR / "residual_vs_pred_log_bands_et_binned.csv", index=False
 )
@@ -1908,10 +1871,6 @@ pd.DataFrame(_series_rows).to_csv(
 
 print("Saved enhanced figures to:", FIGDIR)
 print("Saved (all) source data to:", SRC_DIR)
-
-
-# In[21]:
-
 
 # Learning Curves
 LC_DIR = OUTDIR / "source_data"
@@ -2056,9 +2015,6 @@ print("Learning curves saved:",
 print("Learning curve CSV:", LC_DIR / "learning_curves.csv")
 
 
-# In[22]:
-
-
 # Multi-τ Sweep (0.80–0.99)
 SWEEP_DIR = OUTDIR / "source_data"
 SWEEP_DIR.mkdir(parents=True, exist_ok=True)
@@ -2113,9 +2069,6 @@ print("τ-sweep figures saved:",
       FIGDIR / "tau_sweep_calibration.png",
       FIGDIR / "tau_sweep_pinball.png")
 print("τ-sweep CSV:", SWEEP_DIR / "multi_tau_sweep.csv")
-
-
-# In[23]:
 
 
 def robust_scores_lower(
@@ -2208,7 +2161,7 @@ def robust_scores_lower(
             Xj = Xj / np.where(rj > 0, rj, 1.0)
             J_list.append(Xj.astype(float, copy=False))
 
-        J_all = np.vstack(J_list)  # shape (n*K, d)
+        J_all = np.vstack(J_list)
 
         q_all = np.empty(J_all.shape[0], dtype=float)
         start = 0
@@ -2250,9 +2203,6 @@ def robust_scores_lower(
         if return_min_jitter:
             X_star[i] = Xj[j_star]
     return (S, X_star) if return_min_jitter else S
-
-
-# In[24]:
 
 
 def _adversarial_min_quantile_log(model, x0, eps, *, step=0.02, max_iters=300, topk=5, rng=None):
@@ -2355,9 +2305,6 @@ def robust_scores_lower_adversarial(
     return (S, X_star) if return_min_jitter else S
 
 
-# In[25]:
-
-
 # Reporting wrapper: adversarial min with trace & stationarity flag
 def adversarial_min_with_report(model, x0, eps, *, step=ADV_STEP, max_iters=ADV_MAX_ITERS, topk=ADV_TOPK, rng=None):
     """
@@ -2374,10 +2321,8 @@ def adversarial_min_with_report(model, x0, eps, *, step=ADV_STEP, max_iters=ADV_
         feats = make_features_from_compositions(Xb)
         return np.asarray(model.predict(feats), float).ravel()
 
-    # Run the actual minimizer
     q_min, x_star = _adversarial_min_quantile_log(model, x0, eps, step=step, max_iters=max_iters, topk=topk, rng=rng)
 
-    # One extra local neighborhood scan to test stationarity
     x = x_star.copy()
     d = x.size
     supp      = np.where(x > 1e-12)[0]
@@ -2445,10 +2390,6 @@ def robust_scores_lower_dispatch(
             y_true_log, model, X_elem, eps=eps, K=K, rng=rng
         )
 
-
-# In[27]:
-
-
 def compute_density_ratio_weights(X_cal, X_test, seed=SEED, clip=1e6):
     """
     Return (w_cal, auc, ess), where w_cal ≈ p_test(x)/p_cal(x) estimated via logistic density ratio.
@@ -2466,9 +2407,6 @@ def compute_density_ratio_weights(X_cal, X_test, seed=SEED, clip=1e6):
     ess = float((w.sum()**2) / (np.square(w).sum() + 1e-12)) if w.sum() > 0 else 0.0
     auc = float(roc_auc_score(y_cls, clf.predict_proba(X_cls)[:, 1]))
     return w, auc, ess
-
-
-# In[28]:
 
 
 # High-tail quantile model (τ = QT_TAU_HIGH) + conformal lower bounds
@@ -2722,10 +2660,6 @@ print("Saved source data for figs:",
       (SRC_DIR / "coverage_vs_alpha.csv").name, ",",
       (SRC_DIR / "coverage_vs_epsilon.csv").name)
 
-
-# In[30]:
-
-
 alpha_grid = np.linspace(0.02, 0.30, 15)
 rows_alpha = []
 for a in alpha_grid:
@@ -2736,7 +2670,7 @@ for a in alpha_grid:
     rows_alpha.append({"method":"marginal","alpha":float(a),"target_coverage":float(1-a),
                        "coverage":cov_marg_a})
 
-    # MC (unweighted conformal quantile, manuscript Eq. 10)
+    # MC
     q_mc_a = conformal_qhat(np.maximum(0.0, np.nan_to_num(S_cal_hi_rob_mc, nan=0.0)), a)
     L_mc_a = robust_L_for_comps_hi(X_test_elem, q_cal_robust=q_mc_a, model=cat_qt_hi,
                                    eps=ROBUST_EPS, K=ROBUST_SAMPLES, rng=rng)
@@ -2744,7 +2678,7 @@ for a in alpha_grid:
     rows_alpha.append({"method":"mc","alpha":float(a),"target_coverage":float(1-a),
                        "coverage":cov_mc_a})
 
-    # Adversarial (unweighted conformal quantile, manuscript Eq. 10)
+    # Adversarial
     q_adv_a = conformal_qhat(np.maximum(0.0, np.nan_to_num(S_cal_hi_rob_adv, nan=0.0)), a)
     L_adv_a = robust_L_for_comps_hi(X_test_elem, q_cal_robust=q_adv_a, model=cat_qt_hi,
                                     eps=ROBUST_EPS, K=ROBUST_SAMPLES, rng=rng)
@@ -2783,10 +2717,6 @@ for eps in eps_grid:
 df_eps = pd.DataFrame(rows_eps)
 df_eps.to_csv(SRC_DIR / "coverage_vs_epsilon.csv", index=False)
 
-
-# In[32]:
-
-
 with open(OUTDIR / "reports" / "robust_summary.json", "w") as f:
     json.dump({
         "tau_high": float(QT_TAU_HIGH),
@@ -2799,9 +2729,6 @@ with open(OUTDIR / "reports" / "robust_summary.json", "w") as f:
         "pre_cp": {"obs_tau_cal": obs_tau_cal_hi, "obs_tau_test": obs_tau_test_hi,
                    "pin_cal": pin_cal_hi, "pin_test": pin_test_hi}
     }, f, indent=2)
-
-
-# In[33]:
 
 
 FIGDIR = OUTDIR / "reports" / "figures"
@@ -2828,9 +2755,6 @@ plt.axhline(1 - ALPHA, linestyle="--", label="target")
 plt.xlabel("epsilon"); plt.ylabel("coverage"); plt.legend(); plt.grid(True, alpha=0.3)
 plt.title(f"Coverage vs epsilon (alpha={ALPHA})")
 plt.savefig(FIGDIR / "coverage_vs_epsilon_mc_adv.png", dpi=300, bbox_inches="tight"); plt.close()
-
-
-# In[34]:
 
 
 # No-family ablation: identical splits, identical targets
@@ -2917,9 +2841,6 @@ if True:
             "ess_no_family": ess_nf,
             "alpha": ALPHA, "eps": ROBUST_EPS, "tau": QT_TAU,
         }, f, indent=2)
-
-
-# In[35]:
 
 
 # Visualization for τ=0.99 quantile + (marginal/robust) conformal
@@ -3168,9 +3089,6 @@ print("Saved figures to:", FIGDIR)
 print("Saved source data to:", SRC_DIR)
 
 
-# In[36]:
-
-
 # Conformal score histograms with cutoff lines
 plt.figure(figsize=(6.4, 4.0))
 sns.histplot(np.maximum(0.0, qhat_cal_hi - y_cal), bins=40, kde=True, label="S_marginal", alpha=0.6)
@@ -3186,9 +3104,6 @@ pd.DataFrame({
     "S_marginal": np.maximum(0.0, qhat_cal_hi - y_cal),
     "S_robust": S_cal_hi_rob
 }).to_csv(SRC_DIR / "hi_tau_conformal_scores.csv", index=False)
-
-
-# In[37]:
 
 
 # Enrichment (cumulative hits) vs k at key thresholds
@@ -3212,9 +3127,6 @@ for Dstar in thresholds:
 
     pd.DataFrame({"k": k, "cum_hits": cum_hits, "baseline": base*k}) \
       .to_csv(SRC_DIR / f"hi_tau_enrichment_{int(Dstar)}mm.csv", index=False)
-
-
-# In[38]:
 
 
 # OOD distance (composition L1) and coverage vs distance
@@ -3260,12 +3172,14 @@ savefig_both(FIGDIR / "hi_tau_coverage_vs_ood_distance.png")
 df_ood.to_csv(SRC_DIR / "hi_tau_coverage_vs_ood_distance.csv", index=False)
 
 
-# In[39]:
-
-
 # UMAP of compositions, colored by robust coverage
 X_all = df[elem_cols].to_numpy()
-reducer = umap.UMAP(random_state=SEED, n_neighbors=30, min_dist=0.1, metric="manhattan")
+if HAS_UMAP:
+    reducer = umap.UMAP(random_state=SEED, n_neighbors=30, min_dist=0.1, metric="manhattan")
+    EMBED_METHOD = "UMAP"
+else:
+    reducer = PCA(n_components=2, random_state=SEED)
+    EMBED_METHOD = "PCA"
 Z = reducer.fit_transform(X_all)
 
 Z_df = pd.DataFrame(Z, columns=["z1","z2"])
@@ -3278,14 +3192,11 @@ Z_df.loc[idx_test, "covered_robust"] = (y_test_mm >= L_robust_hi_mm_test).astype
 plt.figure(figsize=(6.0, 5.2))
 sns.scatterplot(data=Z_df[Z_df["set"]=="train"], x="z1", y="z2", s=8, alpha=0.3, label="train")
 sns.scatterplot(data=Z_df[Z_df["set"]=="test"], x="z1", y="z2", hue="covered_robust", palette="Set1", s=24, alpha=0.9)
-plt.title("UMAP of compositions (test colored by robust coverage)")
+plt.title(f"{EMBED_METHOD} of compositions (test colored by robust coverage)")
 plt.legend(frameon=False)
 savefig_both(FIGDIR / "hi_tau_umap_coverage.png")
 
 Z_df.to_csv(SRC_DIR / "hi_tau_umap_embedding.csv", index=False)
-
-
-# In[40]:
 
 
 # Conformal lower bounds
@@ -3407,9 +3318,6 @@ print(f"Coverage@{1-ALPHA:.2f}  "
 
 print(f"Sharpness gap median (mm): "
       f"marginal={shp_m:.3f}, group={shp_g:.3f}, shift-weighted={shp_w:.3f}")
-
-
-# In[41]:
 
 
 # Tolerance-robust conformal lower bounds (± at.% drift)
@@ -3722,9 +3630,6 @@ print("\nSaved curves:", [str(FIGDIR / f"fig_precision_k_{int(D)}mm.png") for D 
 print("Saved CSVs:", SRC_DIR / "precision_at_k_all_methods.csv", "and", SRC_DIR / "average_precision_all_methods.csv")
 
 
-# In[43]:
-
-
 if "embed_allowed_to_full" not in globals():
     def embed_allowed_to_full(X_allowed):
         X_allowed = np.atleast_2d(np.asarray(X_allowed, float))
@@ -3758,9 +3663,6 @@ def _min_jittered_qlog_for_row(x_allowed, *, eps, K, rngseed=None):
         qj     = np.asarray(cat_qt_hi.predict(feats), float).ravel()
 
     return float(np.nanmin(qj))
-
-
-# In[44]:
 
 
 # Coverage bars for high-τ quantile (CAL vs TEST)
@@ -3846,9 +3748,6 @@ else:
     print("Saved coverage bars:", outp, "| and summary:", out_json)
 
 
-# In[45]:
-
-
 if 'allowed_idx' not in globals():
     allowed_idx = list(range(len(elem_cols)))
 
@@ -3914,7 +3813,7 @@ allowed_idx = list(range(len(elem_cols)))
 EPS_robust  = float(globals().get("ROBUST_EPS", 0.01))
 K_robust    = int(globals().get("ROBUST_SAMPLES", 64))
 SEED_LOCAL  = int(globals().get("SEED", 123456))
-BATCH       = int(globals().get("MONDRIAN_BATCH", 64))  # you can tune; stays in-memory
+BATCH       = int(globals().get("MONDRIAN_BATCH", 64))
 
 X_cal_allowed = X_cal_full[:, allowed_idx]
 n_cal, d_allowed = X_cal_allowed.shape
@@ -3933,7 +3832,6 @@ for start in range(0, n_cal, BATCH):
     Xb = X_cal_allowed[start:stop] 
     b  = Xb.shape[0]
 
-    # build jitters per row, stack to (b, K, d_allowed)
     jitters = []
     for i in range(b):
         row_seed = SEED_LOCAL + DRIFT_SEED
@@ -4104,7 +4002,7 @@ class CertifiedObjective:
         Xj_allowed = jitter_allowed_simplex(x_allowed, eps=self.eps, K=self.K, rng=rng_local)
         X_full = embed_allowed_to_full(Xj_allowed)
         feats = make_features_from_compositions(X_full)
-        qj = np.asarray(self.model.predict(feats), float)  # log-quantiles
+        qj = np.asarray(self.model.predict(feats), float)
         return float(np.exp(np.min(qj) - self.qc))
 
     def __call__(self, x_allowed):
@@ -4414,8 +4312,7 @@ def propose_candidates_BO(
     )
 
     # (A) Certificates for ALL predicted exceeders (pre-thinning)
-    #BENCHMARK_MM = float(np.nanmax(np.exp(y_log))) if 'y_log' in globals() else 5.0
-    BENCHMARK_MM = 20.0
+    BENCHMARK_MM = 30.0
 
     exceed_prefilter = pool_prefilter.loc[pool_prefilter["pred_max_mm"] >= BENCHMARK_MM].copy()
     if len(exceed_prefilter):
@@ -4564,8 +4461,7 @@ bo_df["is_novel_vs_all"] = ~bo_df["signature_round"].isin(_known_sigs)
 bo_df_novel = bo_df.loc[bo_df["is_novel_vs_all"]].copy()
 
 # Exceeders
-#BENCHMARK_MM = float(np.nanmax(np.exp(y_log)))
-BENCHMARK_MM = 20.0
+BENCHMARK_MM = 30.0
 
 pref_csv = OUTDIR / "data" / "designed" / f"advanced_candidates_pred_ge_{int(BENCHMARK_MM)}mm_all_prethin.csv"
 if pref_csv.exists():
@@ -4655,8 +4551,7 @@ _dump_jitter_cloud_csv(x_allowed_top, eps=ROBUST_EPS, K=1500, model=cat_qt_hi,
 
 
 # Final selected exceeders with certified CIs (ALL + NOVEL)
-# BENCHMARK_MM = float(np.nanmax(np.exp(y_log)))
-BENCHMARK_MM = 20.0
+BENCHMARK_MM = 30.0
 
 ex_sel = bo_df.loc[bo_df.get("pred_qtau_mm", np.nan) >= BENCHMARK_MM].copy()
 
@@ -4731,9 +4626,6 @@ except Exception:
     print(bo_df.head(10)[display_cols])
 
 
-# In[48]:
-
-
 # Exceeders decomposition (qmin_log, q_sub, L_cert_mm) per backend
 def _qmin_log_from_row(row, K=STAGE2_ROBUST_SAMPLES, eps=ROBUST_EPS, seed=SEED+9090):
     rng = np.random.default_rng(seed)
@@ -4761,9 +4653,6 @@ for f in prethin_files:
     ex["L_cert_mm"]  = np.exp(ex["qmin_log"] - ex["q_sub"])
     ex.to_csv(designed_dir / f"advanced_candidates_exceeders_with_decomposition_{tag}.csv", index=False)
     print(f"[Exceeders decomp] Wrote:", designed_dir / f"advanced_candidates_exceeders_with_decomposition_{tag}.csv")
-
-
-# In[49]:
 
 
 # Prospective validation: join measured casts against predictions & certificate
@@ -4819,9 +4708,6 @@ except Exception as e:
     print("[Prospective join] Skipped:", e)
 
 
-# In[50]:
-
-
 # BLOCK 2: Baselines & Ablations
 reports_dir  = OUTDIR / "reports"
 designed_dir = OUTDIR / "data" / "designed"
@@ -4850,7 +4736,7 @@ def propose_candidates_BO_mean(
 
     def _apply_optional_constraints(x_allowed):
         x_allowed = x_allowed.copy()
-        return x_allowed  # keep simple here; add caps if you used them upstream
+        return x_allowed
 
     def _softmax_to_simplex(u):
         u = np.asarray(u, float)
@@ -4871,12 +4757,9 @@ def propose_candidates_BO_mean(
     # Warm-start from top historical alloys (within allowed elements)
     x0, y0 = [], []
     try:
-        # Take top-N by observed Dmax (y_log on log-mm), filtered to allowed elements
         N_SEEDS = 25
-        # Build per-row allowed-subspace fractions
         X_hist_full = df.loc[:, elem_cols].to_numpy(float)
         X_hist_sub  = X_hist_full[:, allowed_idx]
-        # Normalize rows to simplex of allowed subset
         rs = X_hist_sub.sum(axis=1, keepdims=True)
         ok = (rs[:,0] > 1e-9)
         X_hist_sub = np.divide(X_hist_sub[ok], np.where(rs[ok] > 0, rs[ok], 1.0))
@@ -4892,7 +4775,6 @@ def propose_candidates_BO_mean(
             except Exception:
                 y0_val = None
             y0.append(y0_val)
-        # prune any None
         if any(v is None for v in y0):
             x0 = [a for a,b in zip(x0,y0) if b is not None]
             y0 = [b for b in y0 if b is not None]
@@ -4911,7 +4793,6 @@ def propose_candidates_BO_mean(
         x0=x0 if x0 else None, y0=y0 if x0 else None
     )
     t1 = time.time()
-    # Save trace
     _trace = pd.DataFrame({
         "iter": np.arange(len(res.func_vals)),
         "best_so_far": np.maximum.accumulate(-np.array(res.func_vals)),
@@ -4955,7 +4836,6 @@ def propose_candidates_BO_mean(
     pool["backend"]        = "ET"
     pool["objective"]      = "mean"
 
-    # optional prediction gate/novelty gate to be consistent with certified run
     if pred_gate_quantile is not None:
         qval = float(np.quantile(pred_qtau_mm, pred_gate_quantile))
         pred_gate_mm = qval
@@ -4988,7 +4868,6 @@ bo_df_mean, trace_mean = propose_candidates_BO_mean(
     pred_gate_mm=30.0, pred_gate_quantile=None
 )
 
-# Overlay best-so-far curves if you also saved the certified trace earlier as bo_trace.csv
 try:
     t_cert = pd.read_csv(OUTDIR/"source_data"/"bo_trace.csv")
     t_mean = pd.read_csv(OUTDIR/"source_data"/"bo_trace_mean.csv")
@@ -5028,7 +4907,6 @@ if "pred_max_mm" not in base.columns:
     base["pred_max_mm"] = base.get("pred_qtau_mm", np.nan) 
 
 if "qhat_log" not in base.columns:
-    # recompute qhat on-the-fly
     X_full = embed_allowed_to_full(base[[f"frac_{e}" for e in allowed_elems_present]].to_numpy(float))
     feats  = make_features_from_compositions(X_full)
     base["qhat_log"] = np.asarray(cat_qt_hi.predict(feats), float)
@@ -5114,9 +4992,6 @@ plt.tight_layout(); plt.savefig(reports_dir/"fig_ablation_gates_element_caps.png
 print("Saved:", reports_dir/"ablation_gates_and_element_caps.csv", "and fig_ablation_gates_element_caps.png")
 
 
-# In[51]:
-
-
 # Baseline comparison inset: mean-optimized vs certified-optimized
 designed_dir = OUTDIR / "data" / "designed"
 reports_dir  = OUTDIR / "reports"
@@ -5127,11 +5002,9 @@ pour_csv = designed_dir / f"advanced_pour_list_all_ge_{int(DSTAR) if 'DSTAR' in 
 
 dfp = pd.read_csv(pool_csv)
 
-# Robust metric and "mean-like" predictor
 if "L_robust_mm" not in dfp.columns:
     raise RuntimeError("advanced_bo_pool_et.csv missing L_robust_mm")
 if "pred_point_mm" not in dfp.columns:
-    # Graceful fallback: use high-quantile as the 'optimistic' chooser
     dfp["pred_point_mm"] = dfp.get("pred_qtau_mm", np.nan)
 
 K = 20 
@@ -5156,9 +5029,6 @@ plt.tight_layout()
 outp = reports_dir / "fig_baseline_mean_vs_cert.png"
 plt.savefig(outp, dpi=300, bbox_inches="tight"); plt.close()
 print("Saved baseline inset:", outp)
-
-
-# In[52]:
 
 
 # Stacked at.% bars for top candidates (horizontal)
@@ -5186,7 +5056,7 @@ for e in allowed_elems_present:
     elem_cols_atpct.append(col)
 
 labels = [f"cand_{i+1}" for i in range(len(dfp))]
-Y = dfp[elem_cols_atpct].to_numpy(float)  # shape: [N, E]
+Y = dfp[elem_cols_atpct].to_numpy(float)
 
 fig, ax = plt.subplots(figsize=(7.5, 5.2))
 left = np.zeros(len(dfp))
@@ -5204,9 +5074,6 @@ plt.tight_layout()
 outp = reports_dir / "fig_stacked_atpct_top_designs.png"
 plt.savefig(outp, dpi=300, bbox_inches="tight"); plt.close()
 print("Saved stacked at.% figure:", outp)
-
-
-# In[53]:
 
 
 # Validation figure: measured vs optimistic vs certified
@@ -5228,7 +5095,6 @@ else:
     pool = pd.read_csv(OUTDIR / "data" / "designed" / "advanced_bo_pool_et.csv")
 
     if "pred_max_mm" not in pool.columns:
-        # Fall back to high-τ prediction if q0.99 wasn't available
         pool["pred_max_mm"] = pool.get("pred_qtau_mm", np.nan)
 
     if "signature_round" not in pool.columns:
@@ -5284,15 +5150,11 @@ else:
     print("Saved validation figures:", outp_a, "and", outp_b)
 
 
-# In[54]:
-
-
 # Pareto map: novelty (x) vs certified performance (y)
 designed_dir = OUTDIR / "data" / "designed"
 reports_dir  = OUTDIR / "reports"
 reports_dir.mkdir(parents=True, exist_ok=True)
 
-# Pick a pool file that exists (forest/et naming)
 for _name in ["advanced_bo_pool_forest.csv", "advanced_bo_pool_et.csv", "advanced_bo_pool.csv"]:
     _p = designed_dir / _name
     if _p.exists():
@@ -5318,37 +5180,31 @@ mask_valid = np.isfinite(x) & np.isfinite(y)
 x, y, yse, is_novel = x[mask_valid], y[mask_valid], yse[mask_valid], is_novel[mask_valid]
 
 # Compute non-dominated front for maximizing both x and y
-order = np.argsort(-x)  # sort by decreasing novelty
+order = np.argsort(-x)
 front_idx_local = []
 best_y = -np.inf
 for i in order:
     if y[i] > best_y + 1e-12:
         front_idx_local.append(i)
         best_y = y[i]
-front_idx_local = np.array(sorted(front_idx_local, key=lambda i: x[i]))  # increasing x along the front
+front_idx_local = np.array(sorted(front_idx_local, key=lambda i: x[i]))
 
 # Boolean mask for front (same length as filtered arrays)
 mask_front = np.zeros_like(x, dtype=bool)
 mask_front[front_idx_local] = True
 
-# --- Plot ---
 plt.figure(figsize=(6.8, 4.6))
-# interior points
 plt.scatter(x[~mask_front], y[~mask_front], s=14, alpha=0.30, label="Pool (interior)", zorder=1)
-# front points: NOVEL vs known
 plt.scatter(x[mask_front & is_novel],   y[mask_front & is_novel],   s=46, edgecolor="k", linewidths=0.6,
             label="Pareto front (NOVEL)", zorder=3)
 plt.scatter(x[mask_front & ~is_novel],  y[mask_front & ~is_novel],  s=46, facecolor="none", edgecolor="k",
             linewidths=0.6, label="Pareto front (known)", zorder=3)
 
-# error bars on front (±1.96·SE)
 for i in front_idx_local:
     if yse[i] > 0:
         plt.errorbar(x[i], y[i], yerr=1.96*yse[i], fmt="none", ecolor="k", alpha=0.5, lw=0.6, zorder=2)
 
-# connect the front
 plt.plot(x[front_idx_local], y[front_idx_local], lw=1.4, alpha=0.7, zorder=2)
-
 plt.xlabel("Novelty to training set (at.% L1)")
 plt.ylabel("Certified robust diameter  $L_{robust}$  (mm)")
 plt.title("Novel yet robust: Pareto front in novelty–certificate space")
@@ -5357,17 +5213,13 @@ plt.tight_layout()
 plt.savefig(reports_dir / "fig_pareto_novelty_vs_cert.png", dpi=300, bbox_inches="tight")
 plt.close()
 
-# Write the Pareto-front table, using original dataframe rows
 orig_idx = np.flatnonzero(mask_valid)[front_idx_local]
 dfp.iloc[orig_idx].sort_values(
     ["min_L1_to_ref_atpct","L_robust_mm"], ascending=[False, False]
 ).to_csv(designed_dir / "pareto_front_novelty_vs_cert.csv", index=False)
 
 
-# In[55]:
-
-
-# === One-shot CSV exporter for the Pareto plot (robust: recomputes everything) ===
+# One-shot CSV exporter for the Pareto plot
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -5391,7 +5243,7 @@ def export_pareto_csvs(dfp: pd.DataFrame, outdir: Path):
     x, y, yse, is_novel = x[mask_valid], y[mask_valid], yse[mask_valid], is_novel[mask_valid]
 
     # Non-dominated front (maximize both x and y)
-    order = np.argsort(-x)  # decreasing novelty
+    order = np.argsort(-x)
     front_idx_local = []
     best_y = -np.inf
     for i in order:
@@ -5443,12 +5295,7 @@ def export_pareto_csvs(dfp: pd.DataFrame, outdir: Path):
 
     print("Wrote CSVs to", outdir)
 
-# Call it (reuses your existing dfp and OUTDIR)
 export_pareto_csvs(dfp, OUTDIR / "source_data")
-
-
-# In[56]:
-
 
 # Multi-τ quantiles + tail slope
 TAUS = [0.80, 0.90, 0.95, 0.99]
@@ -5532,9 +5379,6 @@ if 0.99 in cat_qt_grid and 0.90 in cat_qt_grid:
 cand_df.to_csv(SRC_DIR / "candidates_with_multi_tau.csv", index=False)
 
 
-# In[57]:
-
-
 # Sensitivity tornado (±1 at.% moves), robust & cached
 FIGDIR = OUTDIR / "reports" / "figures"
 SRC_DIR = OUTDIR / "source_data"
@@ -5604,7 +5448,7 @@ def eval_robust_L_allowed(x_allowed, eps=ROBUST_EPS, K=ROBUST_SAMPLES, rng=None)
     Xj_allowed = sample_drift_neighborhood(x_allowed, eps=eps, K=K, rng=rng)
     Xj_full = embed_allowed_to_full(Xj_allowed)
     feats = make_features_from_compositions(Xj_full)
-    qj = np.asarray(cat_qt_hi.predict(feats), float)  # log-quantiles
+    qj = np.asarray(cat_qt_hi.predict(feats), float)
     L = float(np.exp(np.min(qj) - q_robust_hi))
     _eval_cache[key] = L
     return L
@@ -5627,12 +5471,12 @@ def tornado_data_for_candidate(x_allowed, step_atpct=1.0):
     d = len(x0)
     recs = []
 
-    for i in range(d):                       # donor
+    for i in range(d):
         if x0[i] <= 1e-12:
             continue
-        delta = min(step, float(x0[i]))      # clipped if donor holds less than step
-        for j in range(d):                   # acceptor
-            if i == j or x0[j] <= 1e-12:     # supp(x) only
+        delta = min(step, float(x0[i]))  
+        for j in range(d): 
+            if i == j or x0[j] <= 1e-12:  
                 continue
             x = x0.copy()
             x[i] -= delta
@@ -5679,7 +5523,6 @@ def plot_tornado(df_tor, title, save_path, top_n=14):
     plt.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close()
 
-# Choose candidates: prefer your BO pool, else cand_df, else design_df
 if 'bo_df' in globals() and len(bo_df) > 0:
     cand_source = bo_df.copy()
 elif 'cand_df' in globals() and len(cand_df) > 0:
@@ -5689,7 +5532,6 @@ elif 'design_df' in globals() and len(design_df) > 0:
 else:
     raise RuntimeError("No candidate table found (bo_df/cand_df/design_df).")
 
-# Ensure certified bound exists for ranking (compute if needed)
 if "L_robust_mm" not in cand_source.columns:
     X_allowed = _cand_allowed_matrix(cand_source)
     Lvals = [eval_robust_L_allowed(x) for x in X_allowed]
@@ -5860,7 +5702,6 @@ def farthest_point_diversity(df_cand, k=15, score_weight=0.10, prefer_allowed=No
 
     return df.iloc[sel].copy()
 
-# restrict to allowed elements for diversity geometry
 try:
     prefer_allowed = allowed_elems_present
 except NameError:
@@ -5898,7 +5739,6 @@ for Dstar in THRESHOLDS_MM:
     SUMMARY["counts"][str(int(Dstar))] = {"pass_all": int(len(cand)), "diverse_top": int(len(diverse))}
     SUMMARY["files"] += [str(f_all), str(f_top)]
 
-# Also shortlist at dataset max (certified beyond known)
 dmax_max_obs = float(df[dmax_col].max())
 cand_max = shortlist(design_df, dmax_max_obs, use_ci_lower=True, min_novelty_atpct=2.0)
 diverse_max = farthest_point_diversity(cand_max, k=15, score_weight=0.10, prefer_allowed=prefer_allowed, metric="l2")
@@ -5921,16 +5761,11 @@ with open(summary_path, "w") as f:
 print("\nSaved shortlist artifacts to:", OUT_DESIGN)
 print("Summary JSON:", summary_path)
 
-
-# In[59]:
-
-
 if 'RAD' not in globals():
     raise RuntimeError("RAD (atomic radii dict) is missing. Define RAD before Step 10.")
 if 'VEC' not in globals():
     raise RuntimeError("VEC (valence electron count dict) is missing. Define VEC before Step 10.")
 
-# Define delta_size_mismatch if it's not in scope
 if 'delta_size_mismatch' not in globals():
     def delta_size_mismatch(row: pd.Series):
         """
@@ -6185,12 +6020,10 @@ if len(targets):
 # 2) Waterfall of element changes (before vs after) for the highest target
 def _waterfall_before_after(tag):
     df_ba = pd.read_csv(SRC_DIR / f"recourse_before_after_{tag}.csv")
-    # discover which elements actually exist in the file
     elems_in_file = sorted(
         {c.replace("before_","") for c in df_ba.columns if c.startswith("before_")}
         & {c.replace("after_","")  for c in df_ba.columns if c.startswith("after_")}
     )
-    # keep the preferred order where possible
     elems = [e for e in allowed_elems_present if e in elems_in_file] or elems_in_file
 
     before = np.array([float(df_ba[f"before_{e}"].iloc[0]) for e in elems])
@@ -6209,9 +6042,6 @@ def _waterfall_before_after(tag):
 
 if len(targets):
     _waterfall_before_after(f"Dstar_{int(round(targets[-1]))}mm")
-
-
-# In[61]:
 
 
 # Reproducibility & artifacts
@@ -6469,9 +6299,6 @@ with open(ART_REP / "README.md", "w", encoding="utf-8") as f:
 print("Saved cleaned data, schema, splits, per-sample test CSV, metrics, calibration artifacts, environment, and manifest under:", OUTDIR)
 
 
-# In[62]:
-
-
 # Artifact & provenance hardening (models, env, manifests, hashes)
 MODELDIR = OUTDIR / "models"
 REPDIR   = OUTDIR / "reports"
@@ -6702,9 +6529,6 @@ print("Figures manifest:", REPDIR / "figures_manifest.json")
 print("Source-data manifest:", REPDIR / "source_data_manifest.json")
 
 
-# In[63]:
-
-
 # Figure helpers
 try:
     _HAS_SNS = True
@@ -6912,9 +6736,6 @@ print("Figure helpers ready:",
       "\n  Use savefig_bundle('subdir/figure_stem', src_df=..., meta=...).")
 
 
-# In[64]:
-
-
 # Reliability figures
 robust_label = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"
 
@@ -7052,9 +6873,6 @@ print("  - figures:", FIGDIR / "reliability_coverage.png", "and", FIGDIR / "reli
 print("  - sources:", SRCDIR / "reliability_coverage_source.csv",
       "and", SRCDIR / "reliability_sharpness_source.csv",
       "plus per-sample table:", SRCDIR / "reliability_per_sample_long.csv")
-
-
-# In[65]:
 
 
 # Tail discovery curves (Precision@k, with CI, baseline, ceiling)
@@ -7248,9 +7066,6 @@ print("Saved tail discovery figures to:", FIGDIR)
 print("Saved per-threshold sources and tail_discovery_all_thresholds.csv to:", SRCDIR)
 
 
-# In[66]:
-
-
 # Stress curves: coverage & sharpness vs tolerance ε
 FIGDIR = (OUTDIR / "reports" / "figures"); FIGDIR.mkdir(parents=True, exist_ok=True)
 (OUTDIR / "source_data").mkdir(parents=True, exist_ok=True)
@@ -7261,12 +7076,11 @@ if 'y_cal'  not in globals(): y_cal  = y_log[idx_cal]
 if 'y_test' not in globals(): y_test = y_log[idx_test]
 
 # Master epsilon list (must match write+read)
-EPS_LIST = [0.000, 0.005, 0.010, 0.020, 0.030]
+EPS_LIST = [0.000, 0.0025, 0.0050, 0.0075, 0.0100, 0.0150, 0.0200]
 
 def eps_tag(eps: float) -> str:
     return f"{int(round(1000*float(eps))):03d}"
 
-# Compose matrices in element space (fractions)
 X_test_elem_full = df.loc[idx_test, elem_cols].to_numpy(float)
 X_test_elem_full /= np.where(X_test_elem_full.sum(axis=1, keepdims=True) > 0,
                              X_test_elem_full.sum(axis=1, keepdims=True), 1.0)
@@ -7274,13 +7088,12 @@ X_cal_elem = df.loc[idx_cal, elem_cols].to_numpy(float)
 X_cal_elem /= np.where(X_cal_elem.sum(axis=1, keepdims=True) > 0,
                        X_cal_elem.sum(axis=1, keepdims=True), 1.0)
 
-# High-τ predictions on CAL/TEST features (already-built feature matrix X_*)
 if "qhat_test_hi" not in globals(): qhat_test_hi = cat_qt_hi.predict(X_test)
 if "qhat_cal_hi"  not in globals(): qhat_cal_hi  = cat_qt_hi.predict(X_cal)
 
-qhat_test_hi = np.asarray(qhat_test_hi, float)       # log scale
-qhat_cal_hi  = np.asarray(qhat_cal_hi,  float)       # log scale
-S_cal_hi     = np.maximum(0.0, qhat_cal_hi - y_cal)  # marginal one-sided residuals (log)
+qhat_test_hi = np.asarray(qhat_test_hi, float)
+qhat_cal_hi  = np.asarray(qhat_cal_hi,  float)
+S_cal_hi     = np.maximum(0.0, qhat_cal_hi - y_cal)
 q_marginal_hi = conformal_qhat(S_cal_hi, ALPHA)
 
 # Subset TEST for stress curves (speed)
@@ -7357,7 +7170,6 @@ for eps in EPS_LIST:
         "n_eval": int(n_eff)
     })
 
-    # write per-ε subset CSV with a stable tag
     tag = eps_tag(eps)
     pd.DataFrame({
         "idx_test_local": eval_subset[m],
@@ -7368,7 +7180,6 @@ for eps in EPS_LIST:
 
 df_stress = pd.DataFrame(records)
 
-# ---- Conditional coverage by novelty/family (read the files we just wrote) ----
 X_train_full = df.loc[idx_train, elem_cols].to_numpy(float) if 'idx_train' in globals() else df.loc[:, elem_cols].to_numpy(float)
 nn = NearestNeighbors(n_neighbors=1, metric="manhattan").fit(X_train_full)
 nov_L1_atpct = nn.kneighbors(X_test_elem_full, 1, return_distance=True)[0].ravel() * 50.0
@@ -7400,7 +7211,7 @@ hi = df_stress["coverage_hi"].values
 plt.plot(x, y, marker="o", label="Observed coverage")
 plt.fill_between(x, lo, hi, alpha=0.15)
 plt.axhline(1-ALPHA, ls="--", color="k", label=f"Target {(1-ALPHA):.2f}")
-plt.xlabel("Tolerance ε (total L1, at.%)")
+plt.xlabel("Drift budget ε (at.% transferred mass)")
 plt.ylabel("Coverage (subset)")
 plt.ylim(0, 1.0)
 plt.title("Robust coverage vs tolerance ε")
@@ -7452,7 +7263,7 @@ glo = df_stress["gap_lo_mm"].values
 ghi = df_stress["gap_hi_mm"].values
 plt.plot(x, g, marker="o", label="Median gap")
 plt.fill_between(x, glo, ghi, alpha=0.15)
-plt.xlabel("Tolerance ε (total L1, at.%)")
+plt.xlabel("Drift budget ε (at.% transferred mass)")
 plt.ylabel("Median gap (mm)")
 plt.title("Robust sharpness vs tolerance ε")
 stamp_info(plt.gca()) if "stamp_info" in globals() else None
@@ -7461,9 +7272,6 @@ savefig_bundle("stress_sharpness_vs_eps",
                meta={"alpha": float(ALPHA), "robust_samples": int(ROBUST_SAMPLES)})
 
 print("Saved stress curves + CSVs to:", OUTDIR / "reports" / "figures", "and", OUTDIR / "source_data")
-
-
-# In[67]:
 
 
 # Design board export (CSV + uncertainty + novelty color + meta)
@@ -7788,9 +7596,6 @@ for Dstar in BOARD_THRESHOLDS:
         print("Saved:", FIGDIR / f"{stem2}.png")
 
 
-# In[68]:
-
-
 # Paper/SI manifest (auto-discovery, hashes, PDFs, CSVs, env, config)
 FIGDIR   = OUTDIR / "reports" / "figures"
 SRC_DIR  = OUTDIR / "source_data"
@@ -7989,7 +7794,6 @@ for f in figs_all:
 src_all = _existing(src_core + src_extra + csv_from_figs)
 design_all = _existing(design_artifacts)
 
-# Config / metrics / env / HPO / models
 cfg_files = _existing([
     REPDIR / "metrics.json",
     REPDIR / "robust_cp_summary.json",
@@ -8064,9 +7868,6 @@ print(f"\nSummary: {manifest['params']['n_figures']} figs, "
       f"{manifest['params']['n_source_csv']} src CSVs, "
       f"{manifest['params']['n_design_csv']} design CSVs, "
       f"{manifest['params']['n_models']} model files | total ~{total_bytes/1e6:.2f} MB")
-
-
-# In[69]:
 
 
 # Label landscape (hist/ECDF, tail markers, split-aware)
@@ -8223,9 +8024,6 @@ print("Saved CSVs:",
       SRC_DIR/"family_counts_by_split.csv")
 
 
-# In[70]:
-
-
 #  Coverage vs TRUE Dmax bins (marginal & robust, with CIs, NaN-safe)
 y_true_mm = np.exp(y_test)
 robust_label = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)" if 'ROBUST_EPS' in globals() else "Robust"
@@ -8310,7 +8108,6 @@ for name, L in methods.items():
 cov_by_true = pd.DataFrame(rows).sort_values(["method","bin"]).reset_index(drop=True)
 cov_by_true.to_csv(SRC_DIR/"cov_by_true_bin.csv", index=False)
 
-# Plot with error bars & target line
 plt.figure(figsize=(6.6, 4.0))
 xvals = cov_by_true["bin_center"].unique()
 xspan = (np.nanmax(xvals) - np.nanmin(xvals)) if len(xvals) > 1 else 1.0
@@ -8345,9 +8142,6 @@ except NameError:
 print("Saved:",
       FIGDIR/"fig_cov_by_true_bin_marg_robust.png",
       "and", SRC_DIR/"cov_by_true_bin.csv")
-
-
-# In[71]:
 
 
 # L (robust) vs truth; mark uncovered
@@ -8430,9 +8224,6 @@ except NameError:
 
 print("Saved figure:", FIGDIR / "fig_L_vs_true_scatter.png")
 print("Saved source:", SRC_DIR / "L_vs_true_points.csv")
-
-
-# In[72]:
 
 
 # Shift-weighted CP diagnostics (enhanced)
@@ -8558,9 +8349,6 @@ print("Saved CSV:",
       SRC_DIR / "shift_weights_cal.csv",
       SRC_DIR / "shift_weight_stats.csv",
       SRC_DIR / "shift_weight_tail_summary.csv")
-
-
-# In[73]:
 
 
 # Worst-case drop Δ under composition jitter
@@ -8725,22 +8513,16 @@ print("Saved CSV:",
       SRC_DIR / "worstcase_drop_summary.csv")
 
 
-# In[76]:
-
-
-# Back-compat wrapper to ensure we can set the seed for replicates
 def _mk_quantile_estimator(tau, seed):
     """
     Returns a quantile regressor with the requested seed, even if an older
     make_quantile_estimator(tau) (no seed kwarg) is already defined in globals.
     """
     try:
-        # Try the current API first
         return mk_quantile_estimator(tau, seed=seed)
     except TypeError as e:
         if "unexpected keyword argument 'seed'" not in str(e):
-            raise  # some other error
-        # Older API: build a model directly so we still control the seed
+            raise
         try:
             from catboost import CatBoostRegressor
             return CatBoostRegressor(
@@ -8757,7 +8539,6 @@ def _mk_quantile_estimator(tau, seed):
                 random_state=int(seed)
             )
 
-
 # Learning curves with replicates: coverage, precision@20, sharpness  (fixed)
 FIGDIR = OUTDIR / "reports" / "figures"
 SRC_DIR = OUTDIR / "source_data"
@@ -8769,7 +8550,6 @@ def _figsave(p):
     except NameError:
         plt.tight_layout(); plt.savefig(p, dpi=300, bbox_inches="tight"); plt.close()
 
-# Safe fallbacks / factories
 if 'weighted_quantile' not in globals():
     def weighted_quantile(values, q, sample_weight=None):
         v = np.asarray(values, float)
@@ -8785,11 +8565,10 @@ def _robust_L_for_test(model, X_elem, q_cal, eps, K, rng):
         rs = Xj.sum(axis=1, keepdims=True)
         Xj = np.divide(Xj, np.where(rs > 0, rs, 1.0))
         feats = make_features_from_compositions(Xj)
-        qj = np.asarray(model.predict(feats), float)  # log-quantiles
+        qj = np.asarray(model.predict(feats), float)
         L_mm[i] = float(np.exp(np.min(qj) - q_cal))
     return L_mm
 
-# ---- Metrics helpers ----
 FRACTIONS = [0.2, 0.4, 0.6, 0.8, 1.0]
 R_REP     = 7
 DSTAR     = 5.0
@@ -8814,7 +8593,6 @@ def _precision_at_k(L_mm, y_mm, thresh, k=20):
     sel = order[:k_eff]
     return float(np.mean(Y[m][sel] >= float(thresh)))
 
-# ---- Data slices ----
 X_train_df = X.iloc[idx_train]
 X_cal_df   = X.iloc[idx_cal]
 X_test_df  = X.iloc[idx_test]
@@ -8913,8 +8691,6 @@ for frac, g in df_lc_rep.groupby("frac_train"):
 df_lc = pd.DataFrame(sum_rows).sort_values("frac_train")
 df_lc.to_csv(SRC_DIR / "learning_curve_metrics_summary.csv", index=False)
 
-# Plots
-
 # Coverage
 plt.figure(figsize=(6.6, 3.9))
 x = df_lc["frac_train"].to_numpy()
@@ -8966,9 +8742,6 @@ print("Saved figures:",
       FIGDIR / "fig_learning_curve_coverage.png,",
       FIGDIR / "fig_learning_curve_precision15.png,",
       FIGDIR / "fig_learning_curve_sharpness.png")
-
-
-# In[80]:
 
 
 # Coverage vs OOD (kNN distance in composition space), with CI + multiple metrics
@@ -9129,13 +8902,9 @@ print("Saved:",
 print("Saved CSV:", SRC_DIR / "coverage_by_ood.csv")
 
 
-# In[81]:
-
-
 # Minimal export for the Sharpness vs OOD scatter
 n = len(ood_primary)
 
-# Try to use your test IDs; fall back to 0..n-1 if lengths don't match
 try:
     test_index = df.loc[idx_test].index
     ids = test_index.astype(str) if len(test_index) == n else pd.Index(range(n)).astype(str)
@@ -9149,9 +8918,6 @@ pd.DataFrame({
 }).to_csv(SRC_DIR / "sharpness_vs_ood_scatter.csv", index=False)
 
 print("Saved:", SRC_DIR / "sharpness_vs_ood_scatter.csv")
-
-
-# In[82]:
 
 
 # Family-out ablation: auto-compute if missing, then summary (coverage bars, deltas) + CSVs
@@ -9205,7 +8971,6 @@ def _row_norm(A):
     s = A.sum(axis=1, keepdims=True)
     return A / np.where(s > 0, s, 1.0)
 
-# ---------- Auto-compute family_out_metrics.csv if missing ----------
 fo_path = OUTDIR / "reports" / "family_out_metrics.csv"
 need_compute = not fo_path.exists()
 
@@ -9383,9 +9148,6 @@ print("Saved CSVs:",
       "and (if available) ablation_familyout_paired_deltas.csv")
 
 
-# In[83]:
-
-
 # Step 12.14 — α–ε risk map (fixed: use proper features + allowed-subset jitter/embedding)
 FIGDIR = OUTDIR / "reports" / "figures"; FIGDIR.mkdir(parents=True, exist_ok=True)
 SRC_DIR = OUTDIR / "source_data";       SRC_DIR.mkdir(parents=True, exist_ok=True)
@@ -9394,7 +9156,7 @@ alpha_grid = [0.05, 0.10, 0.20]
 eps_grid   = [0.00, 0.01, 0.02]
 rng_grid   = np.random.default_rng(SEED + 1400)
 
-# ---- Safety fallback: robust_scores_lower if missing
+# Safety fallback: robust_scores_lower if missing
 if "robust_scores_lower" not in globals():
     def robust_scores_lower(y_cal_log, q_model, X_cal_elem_full, eps, K, rng):
         """Return robust one-sided residuals on CAL: S_i^rob = max(0, min_j q̂τ(x'_ij) - y_i)."""
@@ -9408,7 +9170,7 @@ if "robust_scores_lower" not in globals():
             scores[i]  = max(0.0, float(np.min(qj_log)) - float(y_cal_log[i]))
         return scores
 
-# ---- TEST / CAL compositions (fractions) and features
+# TEST / CAL compositions (fractions) and features
 X_test_elem = df.loc[idx_test, elem_cols].to_numpy(float)
 X_test_elem /= np.where(X_test_elem.sum(axis=1, keepdims=True) > 0, X_test_elem.sum(axis=1, keepdims=True), 1.0)
 fe_test = make_features_from_compositions(X_test_elem)
@@ -9418,7 +9180,7 @@ X_cal_elem /= np.where(X_cal_elem.sum(axis=1, keepdims=True) > 0, X_cal_elem.sum
 fe_cal = make_features_from_compositions(X_cal_elem)
 
 # Labels (log and mm)
-y_test_log = y_log[idx_test] if 'y_log' in globals() else y_test  # ensure log(mm)
+y_test_log = y_log[idx_test] if 'y_log' in globals() else y_test
 y_test_mm  = np.exp(y_test_log)
 
 # High-τ predictions (log → mm) for gap metric
@@ -9439,7 +9201,6 @@ def _robust_min_logq_test(q_model, X_elem_full, eps, K, rng):
 
 def _robust_calibrate_and_eval(alpha, eps):
     """Return (coverage, median gap) at (alpha, eps) on TEST; calibration is split conformal on CAL."""
-    # --- CAL side quantile for subtraction
     if eps == 0.0:
         q_ca_log = np.asarray(cat_qt_hi.predict(fe_cal), float)
         S = np.maximum(0.0, q_ca_log - np.asarray(y_log)[idx_cal])
@@ -9448,7 +9209,6 @@ def _robust_calibrate_and_eval(alpha, eps):
                                 eps=float(eps), K=int(ROBUST_SAMPLES), rng=rng_grid)
     q_alpha = weighted_quantile(S, 1 - alpha) if "weighted_quantile" in globals() else np.quantile(S, 1 - alpha)
 
-    # --- TEST side lower bound under eps
     if eps == 0.0:
         q_te_log = qhat_test_hi_log
         L = np.exp(q_te_log - q_alpha)
@@ -9463,7 +9223,7 @@ def _robust_calibrate_and_eval(alpha, eps):
     gap = float(np.median(qhat_hi_mm[m] - L[m])) if np.any(m) else np.nan
     return cov, gap
 
-# ---- Sweep α × ε
+# Sweep α × ε
 rows = []
 for a in alpha_grid:
     for e in eps_grid:
@@ -9473,7 +9233,7 @@ for a in alpha_grid:
 df_risk = pd.DataFrame(rows)
 df_risk.to_csv(SRC_DIR / "risk_map_alpha_eps.csv", index=False)
 
-# ---- Heatmaps
+# Heatmaps
 pivot_cov = df_risk.pivot(index="alpha", columns="eps_fraction", values="coverage").sort_index(ascending=False)
 pivot_gap = df_risk.pivot(index="alpha", columns="eps_fraction", values="median_gap_mm").sort_index(ascending=False)
 
@@ -9494,33 +9254,21 @@ plt.tight_layout(); plt.savefig(FIGDIR / "fig_riskmap_sharpness.png", dpi=300, b
 print("Saved risk maps:", FIGDIR / "fig_riskmap_coverage.png", "and", FIGDIR / "fig_riskmap_sharpness.png")
 
 
-# In[84]:
-
-
 # lIFT VS. NOVELTY
 elem = elem_cols
-
-# Split matrices
 X_tr = df.loc[idx_train, elem].to_numpy(float)
 X_ca = df.loc[idx_cal,   elem].to_numpy(float)
 X_te = df.loc[idx_test,  elem].to_numpy(float)
-
 X_ref = np.vstack([X_tr, X_ca])
 
 D = pairwise_distances(X_te, X_ref, metric="manhattan")
 nov_te = D.min(axis=1) * 100.0
-
-# Robust lift
 Lr = np.asarray(L_robust_mm, float)
 Lm = np.asarray(L_marginal_mm, float)
 lift = Lr - Lm
-
 m = np.isfinite(lift) & np.isfinite(nov_te)
 df_lift = pd.DataFrame({"novelty_atpct": nov_te[m], "lift_mm": lift[m]})
 df_lift.to_csv(SRC_DIR/"lift_vs_novelty_points.csv", index=False)
-
-
-# In[85]:
 
 
 B = 5
@@ -9544,13 +9292,9 @@ for i, g in df_lift.groupby(bins):
 df_bins = pd.DataFrame(rows)
 df_bins.to_csv(SRC_DIR/"lift_vs_novelty_bins.csv", index=False)
 
-# (Optional) trend stats for caption
 from scipy.stats import spearmanr
 rho, p = spearmanr(df_lift.novelty_atpct, df_lift.lift_mm)
 print("Spearman rho =", rho, "p =", p)
-
-
-# In[86]:
 
 
 # Step 12.16 — Tail-shape atlas (multi-τ on TEST)
@@ -9595,15 +9339,11 @@ plt.title("Heavy-tail atlas: Δq vs q₀.₉₈")
 figsave(FIGDIR/"fig_tail_slope_vs_q99.png")
 
 
-# In[87]:
-
-
 # Step 12.17 — Composition manifold map with certifications
 X_frac = df.loc[:, elem_cols].to_numpy(float)
 mask_train = np.isin(np.arange(len(df)), idx_train)
 mask_test  = np.isin(np.arange(len(df)), idx_test)
 
-# Embed
 try:
     
     emb = umap.UMAP(n_neighbors=25, min_dist=0.15, metric="euclidean", random_state=SEED).fit_transform(X_frac)
@@ -9613,11 +9353,9 @@ except Exception:
 df_emb = pd.DataFrame({"x": emb[:,0], "y": emb[:,1],
                        "split": np.where(mask_train, "train", np.where(mask_test, "test", "other"))})
 
-# color TEST by L_robust
 df_emb["L_robust_mm"] = np.nan
 df_emb.loc[mask_test, "L_robust_mm"] = np.asarray(L_robust_mm, float)
 
-# optional: overlay designed candidates if available
 try:
     pool = bo_df if ('bo_df' in globals() and len(bo_df)) else design_df_all
     X_cand = embed_allowed_to_full(_cand_allowed_matrix(pool))
@@ -9642,9 +9380,6 @@ plt.title("Composition manifold map")
 figsave(FIGDIR/"fig_manifold_map.png")
 
 
-# In[88]:
-
-
 SRC_DIR = Path(SRC_DIR)
 SRC_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -9661,7 +9396,6 @@ df_train.to_csv(SRC_DIR / "composition_embedding_train.csv", index=False, float_
 df_test = df_emb_out.loc[df_emb_out["split"] == "test", ["row_id", "x", "y", "L_robust_mm"]].dropna(subset=["L_robust_mm"])
 df_test.to_csv(SRC_DIR / "composition_embedding_test.csv", index=False, float_format="%.7g")
 
-# (Optional) Store colorbar limits so you can match the matplotlib scale in Origin, if you want.
 if len(df_test):
     cmin, cmax = float(df_test["L_robust_mm"].min()), float(df_test["L_robust_mm"].max())
     pd.DataFrame({"cmin": [cmin], "cmax": [cmax]}).to_csv(SRC_DIR / "composition_embedding_colorbar_limits.csv",
@@ -9672,12 +9406,7 @@ if "emb_cand" in globals() and emb_cand is not None and len(emb_cand):
     df_cand = pd.DataFrame({"x": np.asarray(emb_cand)[:, 0], "y": np.asarray(emb_cand)[:, 1]})
     df_cand.to_csv(SRC_DIR / "composition_embedding_candidates.csv", index=False, float_format="%.7g")
 else:
-    # No candidates available; skip file
     pass
-
-
-# In[89]:
-
 
 # Step 12.18 — Tail-shape atlas (multi-τ on TEST)
 TAUS = [0.80, 0.90, 0.95, 0.99]
@@ -9721,9 +9450,6 @@ plt.title("Heavy-tail atlas: Δq vs q₀.₉₈")
 figsave(FIGDIR/"fig_tail_slope_vs_q99.png")
 
 
-# In[90]:
-
-
 # Step 12.19 — Calibration size sensitivity
 fracs = [0.25, 0.5, 0.75, 1.0]
 rng_cz = np.random.default_rng(SEED+1219)
@@ -9765,9 +9491,6 @@ plt.title("Coverage vs calibration set size"); plt.legend(frameon=False)
 figsave(FIGDIR/"fig_calibration_size_coverage.png")
 
 
-# In[91]:
-
-
 # Step 12.20 — Stability of L_robust vs K and RNG seed
 K_list = [16, 32, 64, 128, 256, 512, 1024]
 seeds   = [SEED+1, SEED+3, SEED+5, SEED+7, SEED+9]
@@ -9807,9 +9530,6 @@ plt.title("Stability of certificates vs K"); plt.legend(frameon=False)
 figsave(FIGDIR/"fig_stability_vs_K.png")
 
 
-# In[92]:
-
-
 # Step 12.21 — Family-stratified quantile reliability
 tau = QT_TAU_HIGH if 'QT_TAU_HIGH' in globals() else QT_TAU
 qhat_te = (qhat_test_hi if 'qhat_test_hi' in globals() else qhat_test)
@@ -9834,9 +9554,6 @@ plt.axvline(tau, ls="--", label=f"τ={tau:.2f}")
 plt.xlabel("Observed P(Y ≤ q̂τ)"); plt.xlim(0,1); plt.title("Quantile reliability by family (test)")
 plt.legend(frameon=False, loc="lower right")
 figsave(FIGDIR/"fig_quantile_reliability_by_family.png")
-
-
-# In[93]:
 
 
 # Step 12.22 — Recourse path overlay on ternary (fixed)
@@ -9906,7 +9623,6 @@ def _rebuild_path_comps(path_df, x0_allowed, hard_caps=None, max_elements=None):
         xs.append(x)
     return np.vstack(xs)
 
-# --- choose seed design (best certified) ---
 seed_df = (design_df_cert_gt if 'design_df_cert_gt' in globals() and isinstance(design_df_cert_gt, pd.DataFrame) and len(design_df_cert_gt)>0
            else design_df_all if 'design_df_all' in globals() and isinstance(design_df_all, pd.DataFrame) and len(design_df_all)>0
            else bo_df)
@@ -9916,7 +9632,6 @@ if seed_df is None or len(seed_df) == 0:
 row0 = seed_df.sort_values("L_robust_mm", ascending=False).iloc[0]
 x0_allowed = _extract_allowed_fractions_from_row(row0)
 
-# --- run recourse with the correct API (schedule/patience) ---
 DSTAR = 5.0
 res = recourse_min_edit_allowed(
     x0_allowed, DSTAR,
@@ -9925,26 +9640,23 @@ res = recourse_min_edit_allowed(
 )
 path_df = res["path"].copy()
 
-# add compositions along the path so CSV is self-contained
 Xseq = _rebuild_path_comps(path_df, x0_allowed, hard_caps=None, max_elements=None)
 for j, e in enumerate(allowed_elems_present):
     path_df[f"frac_{e}"] = Xseq[:, j]
 path_df.to_csv(SRC_DIR / f"recourse_path_Dstar_{int(round(DSTAR))}mm.csv", index=False)
 
-# --- ternary helpers on the top-3 elements of the *seed* composition ---
 def _top3_names(frac_vec):
     order = np.argsort(frac_vec)[::-1][:3]
     return [allowed_elems_present[i] for i in order], order
 
 names3, idx3 = _top3_names(x0_allowed)
 
-def _bary_map(vec):  # map allowed vector to 3D bary of top3 (renormalize on those)
+def _bary_map(vec):
     v = np.asarray(vec, float)[idx3]
     s = v.sum()
     return (v / s) if s > 0 else np.ones(3)/3
 
 def _bary_to_xy(a, b, c):
-    # equilateral ternary coordinates (simple, consistent with many plotting libs)
     x = 0.5*(2*b + c)
     y = (np.sqrt(3)/2.0)*c
     return x, y
@@ -9952,8 +9664,6 @@ def _bary_to_xy(a, b, c):
 # project the whole path to ternary of those 3 elements
 P = np.vstack([_bary_map(Xseq[t]) for t in range(Xseq.shape[0])])
 xy = np.vstack([_bary_to_xy(p[0], p[1], p[2]) for p in P])
-
-# --- plot with arrows ---
 plt.figure(figsize=(6.0, 5.6))
 plt.plot(xy[:,0], xy[:,1], "-o", ms=4)
 for i in range(1, len(xy)):
@@ -9968,9 +9678,6 @@ _figsave(FIGDIR / "fig_recourse_path_ternary.png")
 print("Saved:")
 print(" - Path CSV with per-step compositions:", SRC_DIR / f"recourse_path_Dstar_{int(round(DSTAR))}mm.csv")
 print(" - Ternary path figure:", FIGDIR / "fig_recourse_path_ternary.png")
-
-
-# In[94]:
 
 
 # Coverage per family (random test), multi-method with CIs, FDR, deltas
@@ -10233,9 +9940,6 @@ print("Saved figures:",
       FIGDIR / "fig_per_family_coverage_random.png",
       "and",
       (FIGDIR / "fig_per_family_delta_robust_minus_marginal.png" if len(df_delta) else "—"))
-
-
-# In[95]:
 
 
 # Family-out evaluation (CatBoost-quantile, CIs, FDR, calibration, OOD, shift diag)
@@ -10542,9 +10246,6 @@ print("Saved:",
       OUTDIR / "reports" / "family_out_metrics.csv",
       "and", OUTDIR / "reports" / "family_out_metrics_long.csv",
       "(plus family_out_best_params.json if HPO was available)")
-
-
-# In[96]:
 
 
 # Family-out: per-family error bars + summary figures (enhanced, FDR, OOD, deltas)
@@ -10862,9 +10563,6 @@ print("-", FIGDIR / "fig_family_out_summary_sharpness_bootstrap.png")
 print("-", FIGDIR / "fig_family_out_sharpness_diff_robust_minus_marginal.png")
 
 
-# In[97]:
-
-
 # add near other sklearn imports
 from sklearn.model_selection import GroupShuffleSplit, StratifiedShuffleSplit, ShuffleSplit
 
@@ -10897,9 +10595,6 @@ def _safe_family_split(groups, test_size=0.5, random_state=0, prefer_group_split
     sss = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
     cal_rel, test_rel = next(sss.split(np.zeros(n), groups))
     return cal_rel, test_rel
-
-
-# In[98]:
 
 
 # Redundancy stress: dedup, stratified split, CP metrics, shift diagnostics, artifacts
@@ -11107,7 +10802,7 @@ def _figsave(p):
 
 # (i) Coverage bars with Wilson + bootstrap whiskers
 plt.figure(figsize=(6.6,3.9))
-labels = ["Marginal", f"Robust (±{int(ROBUST_EPS*100)} at.%)"]
+labels = ["Marginal", f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"]
 pts = [cov_m["point"], cov_r["point"]]
 wil_lo = [cov_m["point"]-cov_m["wilson_lo"], cov_r["point"]-cov_r["wilson_lo"]]
 wil_hi = [cov_m["wilson_hi"]-cov_m["point"], cov_r["wilson_hi"]-cov_r["point"]]
@@ -11135,9 +10830,6 @@ print("-", SRC_DIR / "redundancy_dedup_mapping.csv")
 print("-", REPDIR / "redundancy_dedup_splits.json")
 print("-", FIGDIR / "fig_redundancy_stress_coverage.png")
 print("-", FIGDIR / "fig_redundancy_stress_sharpness.png")
-
-
-
 
 
 from sklearn.model_selection import GroupShuffleSplit, StratifiedShuffleSplit, ShuffleSplit
@@ -11170,9 +10862,6 @@ if "_safe_family_split" not in globals():
         ss = ShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
         cal_rel, test_rel = next(ss.split(np.zeros(n)))
         return cal_rel, test_rel
-
-
-
 
 
 # Heaping stress: round labels at several granularities and re-evaluate CP
@@ -11365,7 +11054,7 @@ plt.errorbar(x, df_heap["cov_m_point"],
 plt.errorbar(x, df_heap["cov_r_point"],
              yerr=[df_heap["cov_r_point"]-df_heap["cov_r_boot_lo"],
                    df_heap["cov_r_boot_hi"]-df_heap["cov_r_point"]],
-             marker="o", capsize=4, label=f"Robust (±{int(ROBUST_EPS*100)} at.%)")
+             marker="o", capsize=4, label=f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)")
 plt.axhline(1-ALPHA, ls="--", color="gray", label=f"Target {1-ALPHA:.2f}")
 plt.xlabel("Label rounding (mm)")
 plt.ylabel("Coverage (test)")
@@ -11379,7 +11068,7 @@ plt.close()
 # Sharpness vs rounding (median gap)
 plt.figure(figsize=(6.6,3.9))
 plt.plot(x, df_heap["sharp_m_med_mm"], marker="o", label="Marginal")
-plt.plot(x, df_heap["sharp_r_med_mm"], marker="o", label=f"Robust (±{int(ROBUST_EPS*100)} at.%)")
+plt.plot(x, df_heap["sharp_r_med_mm"], marker="o", label=f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)")
 plt.xlabel("Label rounding (mm)")
 plt.ylabel("Median gap (mm) — lower is better")
 plt.title("Heaping stress — sharpness vs rounding")
@@ -11408,9 +11097,6 @@ print("-", FIGDIR / "fig_heaping_sharpness_vs_rounding.png")
 print("-", FIGDIR / "fig_heaping_quantile_calibration_vs_rounding.png")
 
 
-
-
-
 # Heaping stress: plots + CSV export
 if 'figsave' not in globals():
     def figsave(path):
@@ -11423,7 +11109,7 @@ SRC_DIR = OUTDIR / "source_data"
 FIGDIR.mkdir(parents=True, exist_ok=True)
 SRC_DIR.mkdir(parents=True, exist_ok=True)
 
-robust_tag = f"Robust (±{int(ROBUST_EPS*100)} at.%)"
+robust_tag = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"
 
 def _call_stress_round(df, elem_cols, dmax_col, rmm):
     """
@@ -11566,9 +11252,6 @@ print("Saved figures:",
       ",",
       FIGDIR / "fig_heaping_sharpness_vs_round.png",
       "and (if available) fig_heaping_quantile_calibration_vs_round.png")
-
-
-
 
 
 # Permutation sanity test (marginal + robust, CIs, precision@k, Spearman ρ)
@@ -11772,9 +11455,6 @@ print("Saved CSV:", SRC_DIR / "perm_precision_at_k_both.csv")
 print("Saved JSON:", OUTDIR / "reports" / "perm_sanity_summary.json")
 
 
-
-
-
 # Quantile parity & residual diagnostics (conditional + family CIs + heteroskedasticity + PIT)
 FIGDIR = OUTDIR / "reports" / "figures"
 SRC_DIR = OUTDIR / "source_data"
@@ -11863,6 +11543,7 @@ csv_diag = export_dir / f"quantile_parity_diag_tau_{float(tau_used):.2f}.csv"
 df_diag.to_csv(csv_diag, index=False)
 print(f"Saved:\n- {csv_scatter}\n- {csv_diag} (optional y=x line)")
 
+
 # 2) Residuals r_τ = y − q̂τ (log space) & heteroskedasticity
 r_te = y_te_log - q_te_log
 plt.figure(figsize=(7.0, 4.8))
@@ -11873,9 +11554,7 @@ plt.ylabel("Residual $r_\\tau = y - \\hat q_\\tau$")
 plt.title(f"Quantile residuals vs prediction (τ={tau_used:.2f})")
 _figsave(FIGDIR / "fig_quantile_residual_vs_pred_log.png")
 
-# Heteroskedasticity: |r| vs prediction with running-median line
 abs_r = np.abs(r_te)
-
 qbins = np.quantile(q_te_log, np.linspace(0, 1, 16))
 bid = np.digitize(q_te_log, qbins[1:-1], right=True)
 med_x, med_absr, ns = [], [], []
@@ -11983,6 +11662,7 @@ plt.ylabel("Observed P(Y ≤ $\\hat q_\\tau$)")
 plt.ylim(0, 1); plt.title("Conditional quantile calibration (test)")
 plt.legend(frameon=False, loc="lower right")
 _figsave(FIGDIR / "fig_quantile_conditional_calibration.png")
+
 
 # 4) Family-wise calibration with Wilson CIs (only families with >=5 test samples)
 fam_te = df.iloc[te]["family"].values if "family" in df.columns else np.repeat("all", len(te))
