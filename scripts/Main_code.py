@@ -90,7 +90,7 @@ FAMILY_MIN_TEST = 10
 (OUTDIR / "reports").mkdir(parents=True, exist_ok=True)
 RUN_INFO = {
     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-    "host": .node(),
+    "host": platform.node(),
     "python": sys.version.split()[0],
     "versions": {
         "numpy": np.__version__,
@@ -104,8 +104,14 @@ RUN_INFO = {
         "SEED": SEED,
         "ALPHA": ALPHA,
         "ROBUST_EPS": ROBUST_EPS,
+        "DRIFT_EPS_ATPCT": DRIFT_EPS_ATPCT,
+        "DRIFT_SUPPORT_ONLY": DRIFT_SUPPORT_ONLY,
+        "DRIFT_BOUNDARY_FRAC": DRIFT_BOUNDARY_FRAC,
+        "DRIFT_SEED": DRIFT_SEED,
+        "GRID_STEP_ATPCT": GRID_STEP_ATPCT,
         "ROBUST_SAMPLES": ROBUST_SAMPLES,
         "QT_TAU": QT_TAU,
+        "ADV_STEP": ADV_STEP,
         "THRESHOLDS_MM": THRESHOLDS_MM,
         "MIN_GROUP_N": MIN_GROUP_N,
         "FAMILY_MIN_TEST": FAMILY_MIN_TEST,
@@ -336,6 +342,40 @@ def jitter_allowed_simplex(x_allowed, eps, K, rng):
     return sample_drift_neighborhood(x_allowed, eps, K, rng, include_x=True)
 
 
+def _run_drift_sampler_selftest(n_dims=33):
+    rng_t = np.random.default_rng(0)
+    x = np.zeros(n_dims)
+    supp = [0, 1, 2, 3, 4]
+    for i, v in zip(supp, [0.26, 0.06, 0.08, 0.21, 0.39]):
+        x[i] = v
+
+    S = sample_drift_neighborhood(x, eps=ROBUST_EPS, K=ROBUST_SAMPLES, rng=rng_t)
+    dd = 0.5 * np.abs(S - x[None, :]).sum(axis=1)
+    off = [j for j in range(n_dims) if j not in supp]
+
+    assert np.allclose(S.sum(axis=1), 1.0),        "simplex closure violated"
+    assert (S >= -1e-12).all(),                    "negative atomic fraction produced"
+    assert dd.max() <= ROBUST_EPS + 1e-9,          "drift budget exceeded"
+    assert np.allclose(S[:, off], 0.0),            "support not preserved"
+    assert np.isclose(dd.min(), 0.0),              "nominal composition not included"
+    assert (dd > 0.999 * ROBUST_EPS).mean() > 0.5, "boundary not emphasised"
+
+    want = {(i, j) for i in supp for j in supp if i != j}
+    got = set()
+    for r in S:
+        dvec = r - x
+        nz = np.where(np.abs(dvec) > 1e-10)[0]
+        if nz.size == 2:
+            got.add((int(nz[np.argmin(dvec[nz])]), int(nz[np.argmax(dvec[nz])])))
+    assert want <= got, f"missing single-pair vertices: {sorted(want - got)}"
+
+    n_dir = len({tuple(np.sign(np.round(r - x, 12))) for r in S})
+    print(f"[drift sampler] max d_drift   = {dd.max()*100:.4f} at.% (target {DRIFT_EPS_ATPCT})")
+    print(f"[drift sampler] boundary frac = {(dd > 0.999*ROBUST_EPS).mean():.3f}")
+    print(f"[drift sampler] vertices {len(want & got)}/{len(want)} | directions = {n_dir}")
+
+_run_drift_sampler_selftest()
+
 PT_SYMBOLS = [
     "Ag","Al","Au","B","Be","C","Ca","Ce","Co","Cr","Cu","Dy","Er","Fe","Ga",
     "Gd","Hf","La","Mg","Mn","Mo","Nb","Nd","Ni","P","Pd","Pr","Pt","Sc","Si",
@@ -481,9 +521,8 @@ with open(OUTDIR / "reports" / "schema.json", "w") as f:
 print(json.dumps(schema, indent=2))
 
 
-
-GRID_DECIMALS = 15
-GRID_SCALE = 10 ** GRID_DECIMALS
+GRID_STEP_ATPCT = 0.5
+GRID_STEP_FRAC  = GRID_STEP_ATPCT / 100.0
 
 def mean_abs_dev_mean(s):
     s = np.asarray(s, float)
@@ -495,20 +534,20 @@ def mad_about_median(s):
     med = np.nanmedian(s)
     return float(np.nanmedian(np.abs(s - med)))
 
-def composition_signature(df, elem_cols, decimals=GRID_DECIMALS):
-    decimals = int(decimals)
-    comp = df[elem_cols].to_numpy(float)
-    comp = np.clip(comp, 0.0, None)
-    comp = np.round(comp, decimals)
-    fmt = f"%.{decimals}f"
-    parts = [";".join(fmt % v for v in row) for row in comp]
+def _snap_to_grid(comp, step=None):
+    """Round each atomic fraction to the nearest multiple of `step`."""
+    if step is None:
+        step = GRID_STEP_FRAC
+    comp = np.clip(np.asarray(comp, float), 0.0, None)
+    return np.rint(comp / float(step)).astype(np.int64)
+
+def composition_signature(df, elem_cols, step=None):
+    g = _snap_to_grid(df[elem_cols].to_numpy(float), step)
+    parts = [";".join(map(str, row)) for row in g]
     return pd.Series(parts, index=df.index, name="signature")
 
-def composition_signature_int(df, elem_cols, decimals=GRID_DECIMALS):
-    comp = df[elem_cols].to_numpy(float)
-    comp = np.clip(comp, 0.0, None)
-    sig_int = np.rint(comp * (10 ** decimals)).astype(np.int32)
-    return sig_int
+def composition_signature_int(df, elem_cols, step=None):
+    return _snap_to_grid(df[elem_cols].to_numpy(float), step)
 
 def composition_signature_hash(sig_int, algo="md5"):
     hashes = []
@@ -518,8 +557,8 @@ def composition_signature_hash(sig_int, algo="md5"):
         hashes.append(h)
     return pd.Series(hashes, name="signature_hash")
 
-df["signature"] = composition_signature(df, elem_cols, decimals=GRID_DECIMALS)
-sig_int = composition_signature_int(df, elem_cols, decimals=GRID_DECIMALS)
+df["signature"] = composition_signature(df, elem_cols)
+sig_int = composition_signature_int(df, elem_cols)
 df["signature_hash"] = composition_signature_hash(sig_int, algo="md5")
 
 def iqr(a):
@@ -556,7 +595,7 @@ dup_stats.to_csv(OUTDIR / "reports" / "dups.csv", index=False)
 replicates_resolved.to_csv(OUTDIR / "data" / "processed" / "replicates_resolved.csv", index=False)
 
 n_dups = int((dup_stats["count"] > 1).sum())
-print(f"[Signature grid = 0.{GRID_DECIMALS} at.%] compositions: {df.shape[0]} rows, "
+print(f"[Signature grid = {GRID_STEP_ATPCT} at.%] compositions: {df.shape[0]} rows, "
       f"{dup_stats.shape[0]} unique signatures; duplicates (count>1): {n_dups}")
 dup_stats.head(10)
 
@@ -787,7 +826,7 @@ if "family" not in df.columns:
     df["family"] = pd.Series(np.array(elem_cols)[comp.argmax(axis=1)], name="family")
 
 if "signature" not in df.columns:
-    df["signature"] = composition_signature(df, elem_cols, decimals=2)
+    df["signature"] = composition_signature(df, elem_cols)
 
 def balanced_assign_groups(sig_to_indices, targets, seed=SEED, universe_index=None):
     rng_local = np.random.default_rng(seed)
@@ -1262,7 +1301,8 @@ def robust_L_for_comps_hi(
 
     L_mm = np.empty(X.shape[0], float)
     for i, x in enumerate(X):
-        Xj = jitter_in_L1_ball_simplex(x, eps=float(eps), K=int(K), rng=rng)
+        rng_i = np.random.default_rng(SEED + DRIFT_SEED)
+        Xj = jitter_in_L1_ball_simplex(x, eps=float(eps), K=int(K), rng=rng_i)
         rsj = Xj.sum(axis=1, keepdims=True)
         Xj  = Xj / np.where(rsj > 0, rsj, 1.0)
 
@@ -2152,7 +2192,8 @@ def robust_scores_lower(
     if vectorized:
         J_list = []
         for i in range(n):
-            Xj = jitter_in_L1_ball_simplex(X_elem[i], eps=eps, K=K, rng=rng)
+        rng_i = np.random.default_rng(SEED + DRIFT_SEED)
+        Xj = jitter_in_L1_ball_simplex(x, eps=float(eps), K=int(K), rng=rng_i)
             # Normalize each jitter (safety)
             rj = Xj.sum(axis=1, keepdims=True)
             Xj = Xj / np.where(rj > 0, rj, 1.0)
@@ -2232,10 +2273,10 @@ def _adversarial_min_quantile_log(model, x0, eps, *, step=0.02, max_iters=300, t
     supp = np.where(x > 1e-12)[0]
     if supp.size < 2:
         return q_curr, x.copy()
-
+    
     donors    = supp[np.argsort(-x[supp])][:min(topk, supp.size)]
     receivers = supp[np.argsort( x[supp])][:min(max(topk, 2), supp.size)]
-
+    
     x_star = x.copy()
     q_min = q_curr
     used = 0.0
@@ -2531,6 +2572,12 @@ if not np.isfinite(q_robust_hi):
     q_robust_hi = conformal_qhat(S_cal_hi, ALPHA)
 Q_ROBUST_HI_FROZEN = float(q_robust_hi)
 
+def _assert_cp_frozen():
+    assert np.isclose(float(q_robust_hi), Q_ROBUST_HI_FROZEN), (
+        f"q_robust_hi = {q_robust_hi} but frozen value is {Q_ROBUST_HI_FROZEN}. "
+        "A later cell reassigned the conformal constant."
+    )
+
 w_cal, auc_shift, ess_cal = compute_density_ratio_weights(X_cal, X_test, seed=SEED)
 q_shiftweighted_hi = weighted_quantile(S_cal_hi, 1 - ALPHA, sample_weight=w_cal)
 L_shiftweighted_hi_mm = np.exp(qhat_test_hi - q_shiftweighted_hi)
@@ -2674,18 +2721,16 @@ for a in alpha_grid:
     rows_alpha.append({"method":"marginal","alpha":float(a),"target_coverage":float(1-a),
                        "coverage":cov_marg_a})
 
-    # MC (use the same density-ratio weights!)
-    q_mc_a = weighted_quantile(np.maximum(0.0, np.nan_to_num(S_cal_hi_rob_mc, 0.0)),
-                               1 - a, sample_weight=w_cal)
+    # MC (unweighted conformal quantile, manuscript Eq. 10)
+    q_mc_a = conformal_qhat(np.maximum(0.0, np.nan_to_num(S_cal_hi_rob_mc, nan=0.0)), a)
     L_mc_a = robust_L_for_comps_hi(X_test_elem, q_cal_robust=q_mc_a, model=cat_qt_hi,
                                    eps=ROBUST_EPS, K=ROBUST_SAMPLES, rng=rng)
     cov_mc_a = float(np.mean(y_test_mm >= L_mc_a))
     rows_alpha.append({"method":"mc","alpha":float(a),"target_coverage":float(1-a),
                        "coverage":cov_mc_a})
 
-    # Adversarial
-    q_adv_a = weighted_quantile(np.maximum(0.0, np.nan_to_num(S_cal_hi_rob_adv, 0.0)),
-                                1 - a, sample_weight=w_cal)
+    # Adversarial (unweighted conformal quantile, manuscript Eq. 10)
+    q_adv_a = conformal_qhat(np.maximum(0.0, np.nan_to_num(S_cal_hi_rob_adv, nan=0.0)), a)
     L_adv_a = robust_L_for_comps_hi(X_test_elem, q_cal_robust=q_adv_a, model=cat_qt_hi,
                                     eps=ROBUST_EPS, K=ROBUST_SAMPLES, rng=rng)
     cov_adv_a = float(np.mean(y_test_mm >= L_adv_a))
@@ -2695,11 +2740,7 @@ for a in alpha_grid:
 df_alpha = pd.DataFrame(rows_alpha)
 df_alpha.to_csv(SRC_DIR / "coverage_vs_alpha.csv", index=False)
 
-
-# In[31]:
-
-
-eps_grid = [0.000, 0.005, 0.010, 0.020, 0.030]
+eps_grid = [0.000, 0.0025, 0.0050, 0.0075, 0.0100, 0.0150, 0.0200]
 rows_eps = []
 for eps in eps_grid:
     # MC
@@ -3397,7 +3438,8 @@ def robust_min_logq_batch(q_model, X_elem, eps, K, rng=None, chunk=4096):
         buf_id.clear()
 
     for i, x in enumerate(X_elem):
-        Xj = jitter_in_L1_ball_simplex(x, eps=eps, K=K, rng=rng)
+        rng_i = np.random.default_rng(SEED + DRIFT_SEED)
+        Xj = jitter_in_L1_ball_simplex(x, eps=float(eps), K=int(K), rng=rng_i)
         Xj = _row_normalize(Xj)
         buf_X.append(Xj)
         buf_id.append((i, K))
@@ -3434,7 +3476,7 @@ qhat_test_hi_mm = np.exp(qhat_test_hi)
 
 # Marginal lower bound for side-by-side reporting
 S_cal_marg = np.maximum(0.0, cat_qt_hi.predict(X_cal) - y_cal)
-q_marginal_hi = weighted_quantile(S_cal_marg, 1 - ALPHA)
+q_marginal_hi = conformal_qhat(S_cal_marg, ALPHA)
 L_marginal_mm = np.exp(qhat_test_hi - q_marginal_hi)
 
 # Diagnostics + uncertainty bars
@@ -3503,9 +3545,6 @@ with open(OUTDIR / "reports" / "robust_cp_summary.json", "w") as f:
     json.dump(summary, f, indent=2)
 
 
-# In[42]:
-
-
 # Tail discovery metrics (with CIs, lift, AP)
 sns.set_theme(context="paper", style="whitegrid", font_scale=1.2)
 
@@ -3514,7 +3553,7 @@ _rng_bs = np.random.default_rng(SEED + 607)
 
 if "L_marginal_mm" not in globals():
     S_cal_marg = np.maximum(0.0, (cat_qt_hi.predict(X_cal) - y_cal))
-    q_marginal_hi = weighted_quantile(S_cal_marg, 1 - ALPHA)
+    q_marginal_hi = conformal_qhat(S_cal_marg, ALPHA)
     qhat_test_hi  = cat_qt_hi.predict(X_test) if "qhat_test_hi" not in globals() else qhat_test_hi
     L_marginal_mm = np.exp(qhat_test_hi - q_marginal_hi)
 
@@ -3680,14 +3719,11 @@ if "embed_allowed_to_full" not in globals():
         X_full = X_full / np.where(rs > 0, rs, 1.0)
         return X_full
 
-if "jitter_allowed_simplex" not in globals():
-    def jitter_allowed_simplex(x_allowed, eps, K, rng):
-        Xj = jitter_in_L1_ball_simplex(np.asarray(x_allowed, float), eps=eps, K=int(K), rng=rng)
-        rs = Xj.sum(axis=1, keepdims=True)
-        return Xj / np.where(rs > 0, rs, 1.0)
+assert "sample_drift_neighborhood" in globals(), \
+    "Run the canonical drift-sampler cell (In[4]) first."
 
 def _min_jittered_qlog_for_row(x_allowed, *, eps, K, rngseed=None):
-    rng = np.random.default_rng(SEED_LOCAL if rngseed is None else rngseed)
+    rng = np.random.default_rng(globals().get("SEED_LOCAL", SEED) if rngseed is None else rngseed)
     x_allowed = np.asarray(x_allowed, float).ravel()
 
     if eps <= 0.0 or int(K) <= 1:
@@ -3816,19 +3852,8 @@ if 'embed_allowed_to_full' not in globals():
         row_sums = X_full.sum(axis=1, keepdims=True)
         return np.divide(X_full, np.where(row_sums > 0, row_sums, 1.0))
 
-if 'jitter_allowed_simplex' not in globals():
-    def jitter_allowed_simplex(x_allowed, eps, K, rng):
-        x_allowed = np.asarray(x_allowed, float)
-        out = np.empty((int(K), x_allowed.shape[0]), float)
-        for i in range(int(K)):
-            y = rng.dirichlet(np.ones_like(x_allowed))
-            l1 = np.sum(np.abs(y - x_allowed))
-            if l1 < 1e-12:
-                out[i] = x_allowed
-            else:
-                t = min(1.0, float(eps)/l1)
-                out[i] = project_simplex_fraction((1.0 - t) * x_allowed + t * y)
-        return out
+assert "sample_drift_neighborhood" in globals(), \
+    "Run the canonical drift-sampler cell (In[4]) first."
 
 
 # In[46]:
@@ -3858,7 +3883,7 @@ qhat_cal   = np.asarray(cat_qt_hi.predict(fe_cal), float)
 
 # Marginal one-sided scores
 S_marg = np.maximum(0.0, qhat_cal - y_cal_log)
-q_marg_all = np.quantile(S_marg, 1.0 - ALPHA)
+q_marg_all = conformal_qhat(S_marg, ALPHA)
 
 # Novelty (L1 at.% to TRAIN)
 idx_train = globals().get("idx_train", df.index.difference(idx_cal))
@@ -4017,7 +4042,7 @@ STAGE2_MC_REPS        = 5
 STAGE2_RESCORE_TOP    = 400
 
 # Choose your allowed element list (order matters)
-allowed_elems = ["Be", "Cu", "Fe", "Ti", "Zr", "Ni", "Al", "Co", "La', "Ag"]
+allowed_elems = ["Be", "Cu", "Fe", "Ti", "Zr", "Ni", "Al", "Co", "La", "Ag"]
 
 allowed_elems_present = [e for e in allowed_elems if e in elem_cols]
 missing = [e for e in allowed_elems if e not in elem_cols]
@@ -4043,18 +4068,8 @@ def embed_allowed_to_full(X_allowed):
     row_sums = X_full.sum(axis=1, keepdims=True)
     return np.divide(X_full, np.where(row_sums > 0, row_sums, 1.0))
 
-def jitter_allowed_simplex(x_allowed, eps, K, rng):
-    x_allowed = np.asarray(x_allowed, float)
-    out = np.empty((K, len(x_allowed)), float)
-    for i in range(K):
-        y = rng.dirichlet(np.ones_like(x_allowed))
-        l1 = np.sum(np.abs(y - x_allowed))
-        if l1 < 1e-12:
-            out[i] = x_allowed
-        else:
-            t = min(1.0, eps / l1)
-            out[i] = project_simplex_fraction((1.0 - t) * x_allowed + t * y)
-    return out
+assert "sample_drift_neighborhood" in globals(), \
+    "Run the canonical drift-sampler cell (In[4]) first."
 
 # Certified objective with caching + CRN
 def _hash_x(x, nd=6):
@@ -4147,8 +4162,7 @@ def _softmax_to_simplex(u):
     s = v.sum()
     return (v / s) if s > 0 else np.ones_like(v)/len(v)
 
-if "NOVELTY_L1_ATPCT" not in globals():
-    NOVELTY_L1_ATPCT = 0.2
+NOVELTY_L1_ATPCT = 10.0
 
 def propose_candidates_BO(
     obj: CertifiedObjective,
@@ -4161,7 +4175,7 @@ def propose_candidates_BO(
     stage2_K=STAGE2_ROBUST_SAMPLES,
     stage2_mc_reps=STAGE2_MC_REPS,
     pred_gate_mm=30.00,
-    pred_gate_quantile=0.70,
+    pred_gate_quantile=None,
     backend="forest",
 ):
     d = len(allowed_idx)
@@ -4316,7 +4330,7 @@ def propose_candidates_BO(
 
     if ref_mat is not None and getattr(ref_mat, "size", 0):
         nn = NearestNeighbors(n_neighbors=1, metric="manhattan").fit(ref_mat)
-        min_L1_atpct = nn.kneighbors(X_full, n_neighbors=1, return_distance=True)[0].ravel() * 100.0
+        min_L1_atpct = nn.kneighbors(X_full, n_neighbors=1, return_distance=True)[0].ravel() * 50.0
     else:
         min_L1_atpct = np.full(len(eval_X_allowed), np.inf)
 
@@ -4356,9 +4370,12 @@ def propose_candidates_BO(
 
     n0 = len(pool_all)
     if pred_gate_quantile is not None:
-        qval = float(np.quantile(pred_qtau_mm, pred_gate_quantile))
-        print(f"[BO] Using adaptive qτ gate at {pred_gate_quantile:.2f}-quantile: {qval:.2f} mm")
-        pred_gate_mm = qval
+        if pred_gate_mm is not None:
+            raise ValueError("Set pred_gate_mm OR pred_gate_quantile, not both.")
+        pred_gate_mm = float(np.quantile(pred_qtau_mm, pred_gate_quantile))
+        print(f"[BO] Adaptive qτ gate at {pred_gate_quantile:.2f}-quantile: {pred_gate_mm:.2f} mm")
+    elif pred_gate_mm is not None:
+        print(f"[BO] Fixed qτ gate: {pred_gate_mm:.2f} mm (manuscript screening step)")
     mask_pred = np.ones(n0, bool) if pred_gate_mm is None else (pool_all["pred_qtau_mm"].values >= float(pred_gate_mm))
     mask_nov  = np.ones(n0, bool) if novelty_min_L1_atpct is None else (pool_all["min_L1_to_ref_atpct"].values >= float(novelty_min_L1_atpct))
 
@@ -4372,7 +4389,7 @@ def propose_candidates_BO(
     pool_prefilter.to_csv(designed_dir / f"bo_prefiltered_{backend}.csv", index=False)
 
     if len(pool_prefilter) == 0:
-        print("[BO prefilter] 0 survivors → relaxing qτ gate once (pred_gate_mm=30.00).")
+        print(f"[BO prefilter] 0 survivors → relaxing qτ gate once (pred_gate_mm={pred_gate_mm}).")
         pool_prefilter = pool_all.loc[mask_nov].copy().sort_values("L_robust_mm", ascending=False).reset_index(drop=True)
         if len(pool_prefilter) == 0:
             return pd.DataFrame({"note": ["No BO candidates passed; consider lowering novelty_min_L1_atpct or increasing n_calls."]})
@@ -4421,7 +4438,8 @@ def propose_candidates_BO(
             selected.append(i); continue
         if len(selected) >= diversity_batch:
             break
-        dmin = pairwise_distances(X_atpct[i:i+1], X_atpct[selected], metric='manhattan').min()
+        dmin = 0.5 * pairwise_distances(X_atpct[i:i+1], X_atpct[selected],
+                                        metric='manhattan').min()
         if dmin >= diversity_min_L1_atpct:
             selected.append(i)
 
@@ -4446,14 +4464,14 @@ bo_df = propose_candidates_BO(
     n_random_starts=max(100, 5*len(allowed_idx)),
     xi=0.02, random_state=SEED,
     diversity_batch=30, diversity_min_L1_atpct=2.0,
-    novelty_min_L1_atpct=10.0,
+    novelty_min_L1_atpct=NOVELTY_L1_ATPCT,
     novelty_reference="train",
     hard_caps=None, max_elements=None,
     stage2_rescore_top=STAGE2_RESCORE_TOP,
     stage2_K=STAGE2_ROBUST_SAMPLES,
     stage2_mc_reps=STAGE2_MC_REPS,
     pred_gate_mm=30.00,
-    pred_gate_quantile=0.80,
+    pred_gate_quantile=None,
     backend="forest"
 )
 t1 = time.time()
@@ -4466,14 +4484,14 @@ bo_df_gp = propose_candidates_BO(
     n_random_starts=max(100, 5*len(allowed_idx)),
     xi=0.02, random_state=SEED,
     diversity_batch=30, diversity_min_L1_atpct=2.0,
-    novelty_min_L1_atpct=0.2,
+    novelty_min_L1_atpct=NOVELTY_L1_ATPCT,
     novelty_reference="train",
     hard_caps=None, max_elements=None,
     stage2_rescore_top=STAGE2_RESCORE_TOP,
     stage2_K=STAGE2_ROBUST_SAMPLES,
     stage2_mc_reps=STAGE2_MC_REPS,
     pred_gate_mm=30.00,
-    pred_gate_quantile=0.80,
+    pred_gate_quantile=None,
     backend="gp"
 )
 t3 = time.time()
@@ -4572,7 +4590,7 @@ _topM = min(30, len(_pool_for_eps))
 rows = []
 for i in range(_topM):
     r = _pool_for_eps.iloc[i]
-    df_i = robust_sweep_for_row(r, eps_list=(0.000, 0.005, 0.010, 0.020, 0.030))
+    df_i = robust_sweep_for_row(r, eps_list=(0.000, 0.0025, 0.0050, 0.0075, 0.0100, 0.0150, 0.0200))
     df_i.insert(0, "rank", i+1)
     for e in allowed_elems_present:
         df_i[f"atpct_{e}"] = r.get(f"atpct_{e}", 0.0)
@@ -4806,7 +4824,7 @@ def propose_candidates_BO_mean(
     n_calls=1000,
     n_random_starts=None, xi=0.02, random_state=SEED,
     diversity_batch=30, diversity_min_L1_atpct=2.0,
-    novelty_min_L1_atpct=10.0, novelty_reference="train",
+    novelty_min_L1_atpct=NOVELTY_L1_ATPCT, novelty_reference="train",
     stage2_rescore_top=STAGE2_RESCORE_TOP,
     stage2_K=STAGE2_ROBUST_SAMPLES,
     stage2_mc_reps=STAGE2_MC_REPS,
@@ -4953,7 +4971,7 @@ def propose_candidates_BO_mean(
 bo_df_mean, trace_mean = propose_candidates_BO_mean(
     n_calls=1000, n_random_starts=max(100, 5*len(allowed_idx)),
     xi=0.02, random_state=SEED, diversity_batch=30, diversity_min_L1_atpct=2.0,
-    novelty_min_L1_atpct=0.2, novelty_reference="train",
+    novelty_min_L1_atpct=NOVELTY_L1_ATPCT, novelty_reference="train",
     stage2_rescore_top=STAGE2_RESCORE_TOP,
     stage2_K=STAGE2_ROBUST_SAMPLES, stage2_mc_reps=STAGE2_MC_REPS,
     pred_gate_mm=30.0, pred_gate_quantile=None
@@ -5527,22 +5545,8 @@ if "embed_allowed_to_full" not in globals():
         rs = X_full.sum(axis=1, keepdims=True)
         return np.divide(X_full, np.where(rs > 0, rs, 1.0))
 
-if "jitter_allowed_simplex" not in globals():
-    def jitter_allowed_simplex(x_allowed, eps, K, rng):
-        x_allowed = np.asarray(x_allowed, float)
-        d = len(x_allowed)
-        out = np.empty((K, d), float)
-        for i in range(K):
-            y = rng.dirichlet(np.ones(d))
-            l1 = np.sum(np.abs(y - x_allowed))
-            if l1 < 1e-12:
-                out[i] = x_allowed
-            else:
-                t = min(1.0, eps / l1)
-                out[i] = (1.0 - t) * x_allowed + t * y
-                s = out[i].sum()
-                out[i] = out[i] / s if s > 0 else np.ones(d) / d
-        return out
+assert "sample_drift_neighborhood" in globals(), \
+    "Run the canonical drift-sampler cell (In[4]) first."
 
 def _cand_allowed_matrix(df_rows):
     """
@@ -5595,76 +5599,68 @@ def eval_robust_L_allowed(x_allowed, eps=ROBUST_EPS, K=ROBUST_SAMPLES, rng=None)
 
 def tornado_data_for_candidate(x_allowed, step_atpct=1.0):
     """
-    For each element e:
-      +effect(e) = max_j L(x + step from j→e) - L(x)
-      -effect(e) = min_i L(x + step from e→i) - L(x)   (negative or zero)
-    Returns a sorted DataFrame with columns:
-      element, plus_delta_mm, minus_delta_mm, impact_abs_mm, base_L_mm
+    Directional sensitivity of L_robust to single-pair, mass-conserving
+    transfers (manuscript Fig. 9 and Table S7).
+
+    One row PER ORDERED PAIR (donor -> acceptor). The donor and acceptor
+    identities are recorded, so Fig. 9 labels and Table S7 recipes are
+    reproducible directly from the returned CSV.
     """
     step = float(step_atpct) / 100.0
     x0 = np.asarray(x_allowed, float)
     s = x0.sum()
-    x0 = x0 / s if s > 0 else np.ones_like(x0)/len(x0)
+    x0 = x0 / s if s > 0 else np.ones_like(x0) / len(x0)
 
     base = eval_robust_L_allowed(x0)
     d = len(x0)
-    plus_eff  = np.zeros(d, float)
-    minus_eff = np.zeros(d, float)
+    recs = []
 
-    # +1 at.% to e from best donor j
-    for e in range(d):
-        best_inc = 0.0
-        for j in range(d):
-            if j == e or x0[j] <= step:
+    for i in range(d):                       # donor
+        if x0[i] <= 1e-12:
+            continue
+        delta = min(step, float(x0[i]))      # clipped if donor holds less than step
+        for j in range(d):                   # acceptor
+            if i == j or x0[j] <= 1e-12:     # supp(x) only
                 continue
             x = x0.copy()
-            x[e] += step; x[j] -= step
+            x[i] -= delta
+            x[j] += delta
             x = np.clip(x, 0.0, None)
-            s = x.sum(); x = x / s if s > 0 else x
-            val = eval_robust_L_allowed(x)
-            best_inc = max(best_inc, val - base)
-        plus_eff[e] = best_inc
+            t = x.sum()
+            x = x / (t if t > 0 else 1.0)
+            recs.append({
+                "donor":       allowed_elems_present[i],
+                "acceptor":    allowed_elems_present[j],
+                "transfer":    f"{allowed_elems_present[i]}→{allowed_elems_present[j]}",
+                "delta_atpct": 100.0 * delta,
+                "L_robust_mm": eval_robust_L_allowed(x),
+                "base_L_mm":   base,
+            })
 
-    # −1 at.% from e to worst recipient i (largest drop)
-    for e in range(d):
-        worst_drop = 0.0
-        if x0[e] > step:
-            for i in range(d):
-                if i == e:
-                    continue
-                x = x0.copy()
-                x[e] -= step; x[i] += step
-                x = np.clip(x, 0.0, None)
-                s = x.sum(); x = x / s if s > 0 else x
-                val = eval_robust_L_allowed(x)
-                worst_drop = min(worst_drop, val - base)
-        minus_eff[e] = worst_drop
+    df_tor = pd.DataFrame(recs)
+    if df_tor.empty:
+        return pd.DataFrame(columns=["donor", "acceptor", "transfer", "delta_atpct",
+                                     "L_robust_mm", "base_L_mm", "dL_robust_mm"])
+    df_tor["dL_robust_mm"] = df_tor["L_robust_mm"] - df_tor["base_L_mm"]
+    return df_tor.sort_values("dL_robust_mm").reset_index(drop=True)
 
-    df_tor = pd.DataFrame({
-        "element":       allowed_elems_present,
-        "plus_delta_mm": plus_eff,
-        "minus_delta_mm": minus_eff,
-        "base_L_mm":     base
-    })
-    df_tor["impact_abs_mm"] = np.maximum(df_tor["plus_delta_mm"], -df_tor["minus_delta_mm"])
-    df_tor = df_tor.sort_values("impact_abs_mm", ascending=False).reset_index(drop=True)
-    return df_tor
 
-def plot_tornado(df_tor, title, save_path):
-    plt.figure(figsize=(6.6, max(3.0, 0.28*len(df_tor))))
-    elems = df_tor["element"].tolist()
-    y = np.arange(len(elems))
-    inc = df_tor["plus_delta_mm"].to_numpy()
-    dec = -df_tor["minus_delta_mm"].to_numpy()  # positive widths for left bars
+def plot_tornado(df_tor, title, save_path, top_n=14):
+    """Horizontal bars, one per donor->acceptor transfer, ranked by dL_robust."""
+    if df_tor.empty:
+        return
+    half = max(1, top_n // 2)
+    sub = pd.concat([df_tor.head(half), df_tor.tail(half)])
+    sub = sub.drop_duplicates("transfer").sort_values("dL_robust_mm")
+    y = np.arange(len(sub))
+    vals = sub["dL_robust_mm"].to_numpy()
 
-    # symmetric x-lims for readability
-    xmax = float(np.nanmax(np.concatenate([inc, dec, [1e-12]])))
-    plt.barh(y, -dec, left=0,   alpha=0.75, label="−1 at.% from element")
-    plt.barh(y,  inc, left=0,   alpha=0.75, label="+1 at.% to element")
+    plt.figure(figsize=(6.6, max(3.0, 0.34 * len(sub))))
+    plt.barh(y, vals, color=np.where(vals < 0, "#c0392b", "#2980b9"), alpha=0.85)
     plt.axvline(0, color="k", lw=1)
-    plt.yticks(y, elems); plt.xlabel("Δ L_robust (mm)")
-    plt.xlim(-xmax*1.05, xmax*1.05)
-    plt.title(title); plt.legend(frameon=False, loc="best")
+    plt.yticks(y, sub["transfer"].tolist())
+    plt.xlabel(r"$\Delta L_{\mathrm{robust}}$ (mm)")
+    plt.title(title)
     path = Path(save_path)
     plt.tight_layout()
     plt.savefig(path, dpi=300, bbox_inches="tight")
@@ -5698,7 +5694,8 @@ for i in range(min(N_TOP_TORNADO, len(cand_source))):
     csv_path = SRC_DIR / f"tornado_candidate_{i+1}.csv"
     fig_path = FIGDIR / f"tornado_candidate_{i+1}.png"
     df_tor.to_csv(csv_path, index=False)
-    title = f"Tornado (±1 at.%) — Candidate #{i+1} (L₀={df_tor['base_L_mm'].iloc[0]:.1f} mm)"
+    title = (f"Directional drift sensitivity (1.0 at.% donor→acceptor transfer) — "
+             f"Candidate #{i+1} (L₀={df_tor['base_L_mm'].iloc[0]:.1f} mm)")
     plot_tornado(df_tor, title, fig_path)
 
 print(f"Saved {min(N_TOP_TORNADO, len(cand_source))} tornado CSVs to {SRC_DIR} and figures to {FIGDIR}.")
@@ -7276,7 +7273,7 @@ if "qhat_cal_hi"  not in globals(): qhat_cal_hi  = cat_qt_hi.predict(X_cal)
 qhat_test_hi = np.asarray(qhat_test_hi, float)       # log scale
 qhat_cal_hi  = np.asarray(qhat_cal_hi,  float)       # log scale
 S_cal_hi     = np.maximum(0.0, qhat_cal_hi - y_cal)  # marginal one-sided residuals (log)
-q_marginal_hi = weighted_quantile(S_cal_hi, 1 - ALPHA)
+q_marginal_hi = conformal_qhat(S_cal_hi, ALPHA)
 
 # Subset TEST for stress curves (speed)
 N_eval = min(500, len(idx_test))
@@ -8616,7 +8613,8 @@ def _min_logq_under_jitter(model, X_elem, eps, K, rng=None, chunk=4096):
         return np.asarray(model.predict(feats0), float)
 
     for i, x in enumerate(X_elem):
-        Xj = jitter_in_L1_ball_simplex(x, eps=eps, K=K, rng=rng)
+        rng_i = np.random.default_rng(SEED + DRIFT_SEED)
+        Xj = jitter_in_L1_ball_simplex(x, eps=float(eps), K=int(K), rng=rng_i)
         rs = Xj.sum(axis=1, keepdims=True)
         Xj = np.divide(Xj, np.where(rs > 0, rs, 1.0))
         buf_X.append(Xj); buf_id.append((i, K)); buf_count += K
@@ -8752,9 +8750,6 @@ def _mk_quantile_estimator(tau, seed):
             )
 
 
-# In[79]:
-
-
 # Learning curves with replicates: coverage, precision@20, sharpness  (fixed)
 FIGDIR = OUTDIR / "reports" / "figures"
 SRC_DIR = OUTDIR / "source_data"
@@ -8777,7 +8772,8 @@ def _robust_L_for_test(model, X_elem, q_cal, eps, K, rng):
     """Certified L on TEST for a fitted model at tolerance eps."""
     L_mm = np.zeros(len(X_elem))
     for i, x in enumerate(X_elem):
-        Xj = jitter_in_L1_ball_simplex(x, eps=eps, K=K, rng=rng)
+        rng_i = np.random.default_rng(SEED + DRIFT_SEED)
+        Xj = jitter_in_L1_ball_simplex(x, eps=float(eps), K=int(K), rng=rng_i)
         rs = Xj.sum(axis=1, keepdims=True)
         Xj = np.divide(Xj, np.where(rs > 0, rs, 1.0))
         feats = make_features_from_compositions(Xj)
@@ -9185,17 +9181,7 @@ if 'mk_quantile_estimator' not in globals():
 
 # Simplex jitter in an L1-ball around x (fallback), K samples
 def _jitter_in_L1_ball_simplex(x, eps, K, rng):
-    x = np.asarray(x, float)
-    d = x.size
-    out = np.empty((K, d), float)
-    for k in range(K):
-        y = rng.dirichlet(np.ones(d))
-        l1 = float(np.sum(np.abs(y - x)))
-        t  = 0.0 if l1 <= 1e-12 else min(1.0, float(eps) / l1)
-        z  = (1.0 - t) * x + t * y
-        s  = z.sum()
-        out[k] = z / (s if s > 0 else 1.0)
-    return out
+    return sample_drift_neighborhood(x, eps, K, rng, include_x=True)
 
 # One-sided robust score for lower bound: S_i = max(0, min_j q̂τ(x'_ij) − y_i) in log-space
 def _robust_L_for_test(model, X_elem, q_cal, eps, K, rng):
@@ -10296,35 +10282,6 @@ def bh_fdr(pvals, alpha=0.10):
     out = np.empty_like(q)
     out[order] = q
     return out
-
-def mean_pinball_loss(y_true, y_pred, alpha):
-    y_true = np.asarray(y_true, float); y_pred = np.asarray(y_pred, float)
-    e = y_true - y_pred
-    return float(np.mean(np.maximum(alpha*e, (alpha-1)*e)))
-
-def weighted_quantile(a, q, sample_weight=None):
-    a = np.asarray(a, float)
-    if sample_weight is None:
-        return float(np.quantile(a, q))
-    w = np.asarray(sample_weight, float)
-    m = np.isfinite(a) & np.isfinite(w) & (w > 0)
-    if not np.any(m): return float(np.nan)
-    a, w = a[m], w[m]
-    order = np.argsort(a)
-    a, w = a[order], w[order]
-    cum_w = np.cumsum(w) / np.sum(w)
-    return float(np.interp(q, cum_w, a))
-
-def robust_scores_lower(y_true_log, model, X_elem, eps, K, rng):
-    """S_i = max(0, min_j qτ(x′_ij) − y_i) for LOWER bound robust CP."""
-    y_true_log = np.asarray(y_true_log, float)
-    S = np.empty_like(y_true_log)
-    for i, (y_i, x_i) in enumerate(zip(y_true_log, X_elem)):
-        Xj = jitter_in_L1_ball_simplex(x_i, eps=eps, K=K, rng=rng)
-        feats = make_features_from_compositions(Xj)
-        qj = np.asarray(model.predict(feats), float)
-        S[i] = max(0.0, float(np.min(qj)) - y_i)
-    return S
 
 def robust_L_for_test(model, comp_elem, q_cal_robust, eps, K, rng):
     L_mm = np.zeros(len(comp_elem))
