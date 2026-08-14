@@ -75,13 +75,18 @@ set_all_seeds(SEED)
 rng = np.random.default_rng(SEED)
 
 ALPHA = 0.15
-ROBUST_EPS = 0.01
-ROBUST_SAMPLES = 64
+DRIFT_EPS_ATPCT     = 1.00
+ROBUST_EPS          = DRIFT_EPS_ATPCT / 100.0
+DRIFT_SUPPORT_ONLY  = True 
+DRIFT_BOUNDARY_FRAC = 0.75    
+DRIFT_SEED          = 1000    
+
+ROBUST_SAMPLES = 256         
 QT_TAU = 0.95
 ROBUST_METHOD = "mc"
 ADV_MAX_ITERS = 300
-ADV_STEP = 0.02 
-ADV_TOPK = 5 
+ADV_STEP = 0.001             
+ADV_TOPK = 5
 THRESHOLDS_MM = tuple(sorted({2.0, 5.0, 7.0, 10.0, 15.0, 20.0}))
 MIN_GROUP_N     = 30
 FAMILY_MIN_TEST = 10
@@ -221,27 +226,41 @@ def project_to_simplex_with_caps(x, caps=None, tol=1e-12, max_iter=1000):
     return z
 
 
-def jitter_in_L1_ball_simplex(x, eps, K, rng, include_x=True):
+def _drift_support(x, tol=1e-12):
+    return np.where(np.asarray(x, float) > tol)[0]
+
+
+def sample_drift_neighborhood(x, eps, K, rng, include_x=True,
+                              support_only=None, boundary_frac=None,
+                              enumerate_vertices=True):
     """
-    Sample K compositions within an L1-ball of radius `eps` around x, on the simplex.
-    Implementation: draw y ~ Dirichlet(1), then use x' = (1 - t)*x + t*y with t = min(1, eps / ||y-x||_1).
+    Sample K compositions from the admissible drift neighbourhood
 
-    IMPORTANT (at.% interpretation):
-    - The L1 distance equals twice the total mass moved between components.
-      So eps = 0.01 corresponds to moving ~0.5 at.% from some elements to others.
+        B_eps(x) = { x' in simplex : d_drift(x, x') <= eps },
+        d_drift(x, x') = 0.5 * ||x' - x||_1            (manuscript Eq. 1, Eq. 6)
 
-    Args
-    ----
-    x : 1D array of base composition (fractions summing to ~1)
-    eps : L1 radius (fraction units)
-    K : number of jitters
-    rng : numpy.random.Generator
-    include_x : if True, ensure the base `x` is included among the returned samples (helps stability)
+    `eps` is in the d_drift metric, FRACTION units:
+        eps = 0.01  <=>  1.00 at.% transferred mass  <=>  ||x'-x||_1 <= 0.02
 
-    Returns
-    -------
-    samples : (K, d) array, each row on the simplex and within L1 <= eps of x
+    Every returned sample is a mass-conserving donor -> acceptor transfer among
+    the elements of supp(x): total mass r <= eps is removed from a donor subset
+    D and added to a disjoint acceptor subset A.  No element outside supp(x) is
+    ever populated, and no coordinate becomes negative.
+
+    The K rows are composed as:
+      1  x itself                                  (x in B_eps(x); Eq. 8)
+      +  ALL single-pair vertices x + d*(e_j - e_i), i,j in supp(x)
+         -- the extreme points of the mass-conserving budget, and exactly the
+            transfers scored by the tornado analysis
+      +  random donor/acceptor mixture transfers; `boundary_frac` of them at
+         d_drift == eps exactly, the remainder at a uniformly random radius
+         in (0, eps].
     """
+    if support_only is None:
+        support_only = bool(globals().get("DRIFT_SUPPORT_ONLY", True))
+    if boundary_frac is None:
+        boundary_frac = float(globals().get("DRIFT_BOUNDARY_FRAC", 0.75))
+
     x = np.asarray(x, float)
     d = x.size
     s = x.sum()
@@ -249,46 +268,76 @@ def jitter_in_L1_ball_simplex(x, eps, K, rng, include_x=True):
         raise ValueError("Base composition must have positive finite sum.")
     x = np.clip(x, 0.0, None) / s
 
+    K = int(K)
+    eps = float(max(0.0, eps))
     if eps <= 0.0 or K <= 0:
         return np.broadcast_to(x, (max(K, 1), d)).copy()
 
-    samples = []
+    S = _drift_support(x) if support_only else np.arange(d)
+    m = int(S.size)
+
+    rows = []
     if include_x:
-        samples.append(x.copy())
+        rows.append(x.copy())
 
-    n_draws = max(K - int(include_x), 0)
-    if n_draws > 0:
-        t_levels = (np.arange(n_draws) + 0.5) / n_draws
-        for t0 in t_levels:
-            y = rng.dirichlet(np.ones(d))
-            l1 = float(np.sum(np.abs(y - x)))
-            if l1 < 1e-15:
-                samples.append(x.copy())
-                continue
-            t = min(1.0, eps / l1) * t0
-            xj = (1.0 - t) * x + t * y
-            xj = np.clip(xj, 0.0, None)
-            s = xj.sum()
-            xj = xj / (s if s > 0 else 1.0)
-            samples.append(xj)
+    if m >= 2:
+        if enumerate_vertices:
+            for i in S:
+                delta = min(eps, float(x[i]))
+                if delta <= 0.0:
+                    continue
+                for j in S:
+                    if i == j or len(rows) >= K:
+                        continue
+                    xp = x.copy()
+                    xp[i] -= delta
+                    xp[j] += delta
+                    rows.append(xp)
+                if len(rows) >= K:
+                    break
 
-    samples = np.array(samples, float)
-    if samples.shape[0] < K:
-        for _ in range(K - samples.shape[0]):
-            y = rng.dirichlet(np.ones(d))
-            l1 = float(np.sum(np.abs(y - x)))
-            if l1 < 1e-15:
-                samples = np.vstack([samples, x[None, :]])
-            else:
-                t = min(1.0, eps / l1)
-                xj = (1.0 - t) * x + t * y
-                s = xj.sum()
-                xj = np.clip(xj, 0.0, None) / (s if s > 0 else 1.0)
-                samples = np.vstack([samples, xj[None, :]])
-    elif samples.shape[0] > K:
-        samples = samples[:K]
+        while len(rows) < K:
+            n_D = int(rng.integers(1, m)) 
+            perm = rng.permutation(m)
+            D = S[perm[:n_D]]
+            A = S[perm[n_D:]]
 
-    return samples
+            a = rng.dirichlet(np.ones(D.size))         # donor split
+            b = rng.dirichlet(np.ones(A.size))         # acceptor split
+            r = eps if rng.random() < boundary_frac else eps * float(rng.random())
+
+            take = r * a
+            over = take > x[D]
+            if np.any(over): 
+                scale = float(np.min(x[D][over] / np.maximum(take[over], 1e-300)))
+                take = take * scale
+
+            xp = x.copy()
+            xp[D] -= take
+            xp[A] += take.sum() * b
+            xp = np.clip(xp, 0.0, None)
+            t = xp.sum()
+            rows.append(xp / (t if t > 0 else 1.0))
+    else:
+        while len(rows) < K:
+            rows.append(x.copy())
+
+    out = np.asarray(rows[:K], float)
+    if out.shape[0] < K:
+        out = np.vstack([out, np.broadcast_to(x, (K - out.shape[0], d))])
+
+    dd = 0.5 * np.abs(out - x[None, :]).sum(axis=1)
+    if not np.all(dd <= eps + 1e-9):
+        raise AssertionError(f"drift budget violated: max d_drift={dd.max():.3e} > eps={eps:.3e}")
+    return out
+
+
+def jitter_in_L1_ball_simplex(x, eps, K, rng, include_x=True):
+    return sample_drift_neighborhood(x, eps, K, rng, include_x=include_x)
+
+
+def jitter_allowed_simplex(x_allowed, eps, K, rng):
+    return sample_drift_neighborhood(x_allowed, eps, K, rng, include_x=True)
 
 
 PT_SYMBOLS = [
@@ -364,7 +413,6 @@ if missing_syms:
     print(f"PT symbols not present in this dataset: {missing_syms[:20]}{' ...' if len(missing_syms) > 20 else ''}")
 
 
-# Numeric coercion & rescale
 SUM_TOL = 5e-3
 NEG_TOL = 1e-12 
 FORCE_EXACT_SUM = False
@@ -438,10 +486,7 @@ print(json.dumps(schema, indent=2))
 
 
 
-
-
-# Composition signature & duplicates
-GRID_DECIMALS = 3
+GRID_DECIMALS = 15
 GRID_SCALE = 10 ** GRID_DECIMALS
 
 def mean_abs_dev_mean(s):
@@ -1203,7 +1248,7 @@ def robust_L_for_comps_hi(
         model = cat_qt_hi
 
     if rng is None:
-        rng = np.random.default_rng(SEED + 42)
+        rng = np.random.default_rng(SEED + DRIFT_SEED)
 
     X = np.asarray(X_elem, float)
     if X.ndim == 1:
@@ -1235,9 +1280,6 @@ def robust_L_for_comps_hi(
 
         L_mm[i] = float(np.exp(q_min - float(q_cal_robust)))
     return L_mm
-
-
-# In[19]:
 
 
 # Training (ET point, CatBoost τ-quantile)
@@ -2186,15 +2228,17 @@ def _adversarial_min_quantile_log(model, x0, eps, *, step=0.02, max_iters=300, t
         return np.asarray(model.predict(feats), float).ravel()
 
     q_curr = float(_q_log(x[None, :])[0])
-    budget = float(max(0.0, eps))
+    budget = 2.0 * float(max(0.0, eps))
     if budget <= 0.0:
         return q_curr, x.copy()
 
     d = x.size
-    idx_nonzero = np.where(x > 1e-12)[0]
+    supp = np.where(x > 1e-12)[0]
+    if supp.size < 2:
+        return q_curr, x.copy()
 
-    donors = np.argsort(-x)[:min(topk, len(idx_nonzero))]
-    receivers = np.argsort(x)[:min(max(topk, 2), d)]
+    donors    = supp[np.argsort(-x[supp])][:min(topk, supp.size)]
+    receivers = supp[np.argsort( x[supp])][:min(max(topk, 2), supp.size)]
 
     x_star = x.copy()
     q_min = q_curr
@@ -2231,9 +2275,9 @@ def _adversarial_min_quantile_log(model, x0, eps, *, step=0.02, max_iters=300, t
         if q_try + 1e-12 < q_min:
             x_star = cands[k]
             q_min = q_try
-            used += 2*min(step, step)
-            donors = np.argsort(-x_star)[:min(topk, d)]
-            receivers = np.argsort(x_star)[:min(max(topk, 2), d)]
+            used += 2.0 * float(delta_max)
+            donors    = supp[np.argsort(-x_star[supp])][:min(topk, supp.size)]
+            receivers = supp[np.argsort( x_star[supp])][:min(max(topk, 2), supp.size)]
         else:
             break
 
@@ -2454,12 +2498,20 @@ print(f"[Pre-CP τ={QT_TAU_HIGH:.2f}] P(Y≤q̂): CAL={obs_tau_cal_hi:.3f}, TEST
       f"| pinball: CAL={pin_cal_hi:.5f}, TEST={pin_test_hi:.5f}")
 
 
-# In[29]:
-
-
 # Conformal lower bounds (marginal & robust)
+def conformal_qhat(S, alpha):
+    """Split-conformal one-sided quantile with the finite-sample correction
+    ceil((n+1)(1-alpha))/n required by manuscript Eq. (5)."""
+    S = np.asarray(S, float)
+    S = S[np.isfinite(S)]
+    n = S.size
+    if n == 0:
+        return np.nan
+    lvl = min(1.0, np.ceil((n + 1) * (1.0 - float(alpha))) / n)
+    return float(np.quantile(S, lvl, method="higher"))
+
 S_cal_hi = np.maximum(0.0, qhat_cal_hi - y_cal)
-q_marginal_hi = weighted_quantile(S_cal_hi, 1 - ALPHA)
+q_marginal_hi = conformal_qhat(S_cal_hi, ALPHA)
 L_marginal_hi_mm = np.exp(qhat_test_hi - q_marginal_hi)
 
 X_cal_elem  = df.loc[idx_cal,  elem_cols].to_numpy()
@@ -2481,11 +2533,15 @@ S_cal_hi_rob = np.asarray(S_cal_hi_rob, float)
 S_cal_hi_rob[~np.isfinite(S_cal_hi_rob)] = 0.0
 S_cal_hi_rob = np.maximum(0.0, S_cal_hi_rob)
 
-w_cal, auc_shift, ess_cal = compute_density_ratio_weights(X_cal, X_test, seed=SEED)
-q_robust_hi = weighted_quantile(S_cal_hi_rob, 1 - ALPHA, sample_weight=w_cal)
-
+q_robust_hi = conformal_qhat(S_cal_hi_rob, ALPHA)
 if not np.isfinite(q_robust_hi):
-    q_robust_hi = weighted_quantile(S_cal_hi, 1 - ALPHA, sample_weight=w_cal)
+    q_robust_hi = conformal_qhat(S_cal_hi, ALPHA)
+Q_ROBUST_HI_FROZEN = float(q_robust_hi)
+
+w_cal, auc_shift, ess_cal = compute_density_ratio_weights(X_cal, X_test, seed=SEED)
+q_shiftweighted_hi = weighted_quantile(S_cal_hi, 1 - ALPHA, sample_weight=w_cal)
+L_shiftweighted_hi_mm = np.exp(qhat_test_hi - q_shiftweighted_hi)
+print(f"[Shift-weighted CP] q={q_shiftweighted_hi:.4f} | classifier AUC={auc_shift:.3f} | ESS={ess_cal:.1f}")
 
 print(f"[Robust CP @ eps={ROBUST_EPS:.3f}] "
       f"score min/med/max = {np.nanmin(S_cal_hi_rob):.4f}/{np.nanmedian(S_cal_hi_rob):.4f}/{np.nanmax(S_cal_hi_rob):.4f}, "
@@ -2516,9 +2572,9 @@ S_cal_hi_rob_adv = robust_scores_lower_dispatch(
 
 def post_cp(S_cal_hi_rob):
     S = np.maximum(0.0, np.nan_to_num(np.asarray(S_cal_hi_rob, float), nan=0.0))
-    q = weighted_quantile(S, 1 - ALPHA, sample_weight=w_cal)
+    q = conformal_qhat(S, ALPHA)
     if not np.isfinite(q):  # fallback
-        q = weighted_quantile(S_cal_hi, 1 - ALPHA, sample_weight=w_cal)
+        q = conformal_qhat(S_cal_hi, ALPHA)
     L = robust_L_for_comps_hi(
         X_test_elem, q_cal_robust=q, model=cat_qt_hi, eps=ROBUST_EPS, K=ROBUST_SAMPLES, rng=rng
     )
@@ -2539,7 +2595,7 @@ for a in alpha_grid:
     L_marg_a = np.exp(qhat_test_hi - q_marg_a)
     cov_marg_a = float(np.mean(y_test_mm >= L_marg_a))
 
-    q_rob_a = weighted_quantile(S_cal_hi_rob, 1 - a, sample_weight=w_cal)
+    q_rob_a = conformal_qhat(S_cal_hi_rob, a)
     L_rob_a = robust_L_for_comps_hi(
         X_test_elem, q_cal_robust=q_rob_a, model=cat_qt_hi,
         eps=ROBUST_EPS, K=ROBUST_SAMPLES, rng=rng
@@ -2556,12 +2612,12 @@ for a in alpha_grid:
 df_alpha = pd.DataFrame(rows_alpha)
 df_alpha.to_csv(SRC_DIR / "coverage_vs_alpha.csv", index=False)
 
-eps_grid = [0.000, 0.005, 0.010, 0.020, 0.030]
+eps_grid = [0.000, 0.0025, 0.0050, 0.0075, 0.0100, 0.0150, 0.0200]
 rows_eps = []
 for eps in eps_grid:
     S_eps = robust_scores_lower_dispatch(y_cal, cat_qt_hi, X_cal_elem, eps=eps, K=ROBUST_SAMPLES, rng=rng)
     S_eps = np.maximum(0.0, np.nan_to_num(S_eps, nan=0.0))
-    q_eps = weighted_quantile(S_eps, 1 - ALPHA, sample_weight=w_cal)
+    q_eps = conformal_qhat(S_eps, ALPHA)
     L_eps = robust_L_for_comps_hi(X_test_elem, q_cal_robust=q_eps, model=cat_qt_hi,
                                   eps=eps, K=ROBUST_SAMPLES, rng=rng)
     cov_eps = float(np.mean(y_test_mm >= L_eps))
@@ -2657,7 +2713,7 @@ for eps in eps_grid:
     S_mc = robust_scores_lower_dispatch(y_cal, cat_qt_hi, X_cal_elem,
                                         eps=eps, K=ROBUST_SAMPLES, rng=rng, method="mc")
     S_mc = np.maximum(0.0, np.nan_to_num(S_mc, 0.0))
-    q_mc_eps = weighted_quantile(S_mc, 1 - ALPHA, sample_weight=w_cal)
+    q_mc_eps = conformal_qhat(S_mc, ALPHA)
     L_mc_eps = robust_L_for_comps_hi(X_test_elem, q_cal_robust=q_mc_eps, model=cat_qt_hi,
                                      eps=eps, K=ROBUST_SAMPLES, rng=rng)
     cov_mc_eps = float(np.mean(y_test_mm >= L_mc_eps))
@@ -2668,7 +2724,7 @@ for eps in eps_grid:
     S_adv = robust_scores_lower_dispatch(y_cal, cat_qt_hi, X_cal_elem,
                                          eps=eps, K=ROBUST_SAMPLES, rng=rng, method="adversarial")
     S_adv = np.maximum(0.0, np.nan_to_num(S_adv, 0.0))
-    q_adv_eps = weighted_quantile(S_adv, 1 - ALPHA, sample_weight=w_cal)
+    q_adv_eps = conformal_qhat(S_adv, ALPHA)
     L_adv_eps = robust_L_for_comps_hi(X_test_elem, q_cal_robust=q_adv_eps, model=cat_qt_hi,
                                       eps=eps, K=ROBUST_SAMPLES, rng=rng)
     cov_adv_eps = float(np.mean(y_test_mm >= L_adv_eps))
@@ -3326,53 +3382,7 @@ def robust_min_logq_batch(q_model, X_elem, eps, K, rng=None, chunk=4096):
     Uses chunked batching to keep memory and prediction time in check.
     """
     if rng is None:
-        rng = np.random.default_rng(SEED + 202)
-    X_elem = np.asarray(X_elem, float)
-    n, d = X_elem.shape
-    qmin = np.full(n, np.inf, dtype=float)
-
-    buf_X, buf_id = [], []
-    buf_count = 0
-
-    def _flush():
-        nonlocal qmin, buf_X, buf_id, buf_count
-        if not buf_X:
-            return
-        Xj = np.vstack(buf_X)
-        feats = make_features_from_compositions(Xj) 
-        preds = np.asarray(q_model.predict(feats), float)
-        assert preds.shape[0] == buf_count, "Batch size mismatch in robust_min_logq_batch."
-        start = 0
-        for sid, count in buf_id:
-            block = preds[start:start+count]
-            qmin[sid] = min(qmin[sid], float(np.nanmin(block)))
-            start += count
-        buf_X.clear(); buf_id.clear(); buf_count = 0
-
-    for i, x in enumerate(X_elem):
-        Xj = jitter_in_L1_ball_simplex(x, eps=eps, K=K, rng=rng)
-        Xj = _row_normalize(Xj)
-        buf_X.append(Xj); buf_id.append((i, K)); buf_count += K
-        if buf_count >= chunk:
-            _flush()
-    _flush()
-
-    bad = ~np.isfinite(qmin)
-    if np.any(bad):
-        feats0 = make_features_from_compositions(X_elem[bad])
-        q0 = np.asarray(q_model.predict(feats0), float)
-        qmin[bad] = q0
-    return qmin
-
-# Faster, memory-safe robust prediction of min log-quantile on TEST
-def robust_min_logq_batch(q_model, X_elem, eps, K, rng=None, chunk=4096):
-    """
-    For each x in X_elem, jitter K times (L1-ball radius eps), predict log-quantiles,
-    and return the per-sample minimum (worst-case) log q_τ.
-    Uses chunked batching to keep memory and prediction time in check.
-    """
-    if rng is None:
-        rng = np.random.default_rng(SEED + 202)
+        rng = np.random.default_rng(SEED + DRIFT_SEED)
     X_elem = np.asarray(X_elem, float)
     n, d = X_elem.shape
     qmin = np.full(n, np.inf, dtype=float)
@@ -3410,27 +3420,18 @@ def robust_min_logq_batch(q_model, X_elem, eps, K, rng=None, chunk=4096):
     return qmin
 
 # Robust calibration quantile on CAL
-S_cal_rob = robust_scores_lower(
-    y_true_log=y_cal,
-    model=cat_qt_hi,
-    X_elem=X_cal_elem,
-    eps=ROBUST_EPS,
-    K=ROBUST_SAMPLES,
-    rng=np.random.default_rng(SEED + 321)
-)
+assert "q_robust_hi" in globals() and np.isfinite(q_robust_hi), \
+    "Run Cell 28 first: q_robust_hi must already be defined."
+assert "Q_ROBUST_HI_FROZEN" in globals() and np.isclose(float(q_robust_hi), Q_ROBUST_HI_FROZEN), \
+    "q_robust_hi was modified after Cell 28."
 
-S_cal_rob = np.maximum(0.0, np.nan_to_num(S_cal_rob, nan=0.0))
-q_robust_hi = weighted_quantile(S_cal_hi_rob, 1 - ALPHA)
-if not np.isfinite(q_robust_hi):
-    S_cal_marg = np.maximum(0.0, (cat_qt_hi.predict(X_cal) - y_cal))
-    q_robust_hi = weighted_quantile(S_cal_marg, 1 - ALPHA)
-if not np.isfinite(q_robust_hi):
-    raise RuntimeError("q_robust_hi is not finite after fallbacks; check scores and features.")
+S_cal_rob = np.maximum(0.0, np.nan_to_num(np.asarray(S_cal_hi_rob, float), nan=0.0))
+print(f"[CP] Using frozen q_robust_hi = {q_robust_hi:.6f} (set in Cell 28)")
 
 # Robust TEST bounds (mm)
 qmin_test_log = robust_min_logq_batch(
     cat_qt_hi, X_test_elem, eps=ROBUST_EPS, K=ROBUST_SAMPLES,
-    rng=np.random.default_rng(SEED + 777), chunk=4096
+    rng=np.random.default_rng(SEED + DRIFT_SEED), chunk=4096
 )
 L_robust_mm = np.exp(qmin_test_log - q_robust_hi)
 
@@ -3597,7 +3598,7 @@ if "L_group_mm" in globals():
 if "L_weighted_mm" in globals():
     methods.append(("Shift-weighted", L_weighted_mm))
 if "L_robust_mm" in globals():
-    robust_label = f"Robust (±{ROBUST_EPS*100:.0f} at.%)"
+    robust_label = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"
     methods.append((robust_label, L_robust_mm))
 
 if not methods:
@@ -3877,7 +3878,7 @@ nov_bins = pd.cut(nov_L1_atpct_cal, bins=[-0.01,0.5,1.0,2.0,np.inf], labels=["�
 family_cal = _sig_family_argmax(X_cal_full)
 
 # Robust (jittered) scores on CAL
-allowed_idx = globals().get("allowed_idx", list(range(len(elem_cols))))
+allowed_idx = list(range(len(elem_cols)))
 EPS_robust  = float(globals().get("ROBUST_EPS", 0.01))
 K_robust    = int(globals().get("ROBUST_SAMPLES", 64))
 SEED_LOCAL  = int(globals().get("SEED", 123456))
@@ -3904,7 +3905,7 @@ for start in range(0, n_cal, BATCH):
     # build jitters per row, stack to (b, K, d_allowed)
     jitters = []
     for i in range(b):
-        row_seed = SEED_LOCAL + 100 + start + i
+        row_seed = SEED_LOCAL + DRIFT_SEED
         Xj = _jitters_one(Xb[i], eps=EPS_robust, K=K_robust, seed=row_seed)
         jitters.append(Xj)
     Xj_allowed = np.stack(jitters, axis=0)
@@ -4016,16 +4017,14 @@ else:
     _elem_mat_train = _elem_mat_all
 
 # Stage-1 vs Stage-2 robustness settings
-if "STAGE1_ROBUST_SAMPLES" not in globals(): STAGE1_ROBUST_SAMPLES = 64
-if "STAGE1_MC_REPS"        not in globals(): STAGE1_MC_REPS = 1
-
-# Use your original robust settings for Stage-2 (defaults to existing globals)
-if "STAGE2_ROBUST_SAMPLES" not in globals(): STAGE2_ROBUST_SAMPLES = max(ROBUST_SAMPLES, 512)
-if "STAGE2_MC_REPS"        not in globals(): STAGE2_MC_REPS = 5
-if "STAGE2_RESCORE_TOP"    not in globals(): STAGE2_RESCORE_TOP = 400
+STAGE1_ROBUST_SAMPLES = int(ROBUST_SAMPLES)
+STAGE1_MC_REPS        = 1
+STAGE2_ROBUST_SAMPLES = int(ROBUST_SAMPLES)
+STAGE2_MC_REPS        = 5
+STAGE2_RESCORE_TOP    = 400
 
 # Choose your allowed element list (order matters)
-allowed_elems = ["Ag","Al","Co","Cu","Fe","Hf","La","Nb","Ni","Ti","Zr"]
+allowed_elems = ["Be", "Cu", "Fe", "Ti", "Zr", "Ni", "Al", "Co", "La', "Ag"]
 
 allowed_elems_present = [e for e in allowed_elems if e in elem_cols]
 missing = [e for e in allowed_elems if e not in elem_cols]
@@ -4078,7 +4077,7 @@ class CertifiedObjective:
         self.mc_reps = int(mc_reps)
         self.allowed_idx = allowed_idx
         self.crn = np.random.default_rng(crn_seed)
-        self.crn_dirs = [self.crn.integers(0, 10**9) for _ in range(10**5)]
+        self.crn_dirs = [int(SEED + DRIFT_SEED + r) for r in range(max(1, self.mc_reps))]
         self._cache = {}
 
     def _eval_once(self, x_allowed, seed):
@@ -4093,9 +4092,7 @@ class CertifiedObjective:
         key = _hash_x(x_allowed)
         if key in self._cache:
             return self._cache[key]
-        seeds = [self.crn_dirs[len(self._cache) % len(self.crn_dirs)]]
-        for r in range(self.mc_reps - 1):
-            seeds.append(SEED + 1234 + r*9973)
+        seeds = list(self.crn_dirs[:max(1, self.mc_reps)])
         vals = [self._eval_once(x_allowed, s) for s in seeds]
         out = {
             "L_robust_mm": float(np.mean(vals)),
@@ -4106,7 +4103,7 @@ class CertifiedObjective:
         return out
 
 # ε-sensitivity & jitter visualization helpers
-def robust_sweep_for_row(row, eps_list=(0.000, 0.005, 0.010, 0.020, 0.030),
+def robust_sweep_for_row(row, eps_list=(0.000, 0.0025, 0.0050, 0.0075, 0.0100, 0.0150, 0.0200),
                          model=cat_qt_hi, q_cal=q_robust_hi,
                          k_stage2=STAGE2_ROBUST_SAMPLES, mc_reps=STAGE2_MC_REPS,
                          rng_seed=SEED+7):
@@ -4163,14 +4160,14 @@ if "NOVELTY_L1_ATPCT" not in globals():
 def propose_candidates_BO(
     obj: CertifiedObjective,
     n_calls=1000, n_random_starts=40, xi=0.02, random_state=SEED,
-    diversity_batch=30, diversity_min_L1_atpct=1.0,
+    diversity_batch=30, diversity_min_L1_atpct=2.0,
     novelty_min_L1_atpct=NOVELTY_L1_ATPCT,
     novelty_reference="train",
     hard_caps=None, max_elements=None,
-    stage2_rescore_top=STAGE2_ROBUST_SAMPLES,
+    stage2_rescore_top=STAGE2_RESCORE_TOP,
     stage2_K=STAGE2_ROBUST_SAMPLES,
     stage2_mc_reps=STAGE2_MC_REPS,
-    pred_gate_mm=None,
+    pred_gate_mm=30.00,
     pred_gate_quantile=0.70,
     backend="forest",
 ):
@@ -4382,7 +4379,7 @@ def propose_candidates_BO(
     pool_prefilter.to_csv(designed_dir / f"bo_prefiltered_{backend}.csv", index=False)
 
     if len(pool_prefilter) == 0:
-        print("[BO prefilter] 0 survivors → relaxing qτ gate once (pred_gate_mm=None).")
+        print("[BO prefilter] 0 survivors → relaxing qτ gate once (pred_gate_mm=30.00).")
         pool_prefilter = pool_all.loc[mask_nov].copy().sort_values("L_robust_mm", ascending=False).reset_index(drop=True)
         if len(pool_prefilter) == 0:
             return pd.DataFrame({"note": ["No BO candidates passed; consider lowering novelty_min_L1_atpct or increasing n_calls."]})
@@ -4455,14 +4452,14 @@ bo_df = propose_candidates_BO(
     n_calls=1000,
     n_random_starts=max(100, 5*len(allowed_idx)),
     xi=0.02, random_state=SEED,
-    diversity_batch=30, diversity_min_L1_atpct=1.0,
-    novelty_min_L1_atpct=0.2,
+    diversity_batch=30, diversity_min_L1_atpct=2.0,
+    novelty_min_L1_atpct=10.0,
     novelty_reference="train",
     hard_caps=None, max_elements=None,
-    stage2_rescore_top=STAGE2_ROBUST_SAMPLES,
+    stage2_rescore_top=STAGE2_RESCORE_TOP,
     stage2_K=STAGE2_ROBUST_SAMPLES,
     stage2_mc_reps=STAGE2_MC_REPS,
-    pred_gate_mm=None,
+    pred_gate_mm=30.00,
     pred_gate_quantile=0.80,
     backend="forest"
 )
@@ -4475,14 +4472,14 @@ bo_df_gp = propose_candidates_BO(
     n_calls=1000,
     n_random_starts=max(100, 5*len(allowed_idx)),
     xi=0.02, random_state=SEED,
-    diversity_batch=30, diversity_min_L1_atpct=1.0,
+    diversity_batch=30, diversity_min_L1_atpct=2.0,
     novelty_min_L1_atpct=0.2,
     novelty_reference="train",
     hard_caps=None, max_elements=None,
-    stage2_rescore_top=STAGE2_ROBUST_SAMPLES,
+    stage2_rescore_top=STAGE2_RESCORE_TOP,
     stage2_K=STAGE2_ROBUST_SAMPLES,
     stage2_mc_reps=STAGE2_MC_REPS,
-    pred_gate_mm=None,
+    pred_gate_mm=30.00,
     pred_gate_quantile=0.80,
     backend="gp"
 )
@@ -4815,12 +4812,12 @@ print("[Ablation 2.1] Running BO with mean objective (ET) for comparison...")
 def propose_candidates_BO_mean(
     n_calls=1000,
     n_random_starts=None, xi=0.02, random_state=SEED,
-    diversity_batch=30, diversity_min_L1_atpct=1.0,
-    novelty_min_L1_atpct=0.5, novelty_reference="train",
+    diversity_batch=30, diversity_min_L1_atpct=2.0,
+    novelty_min_L1_atpct=10.0, novelty_reference="train",
     stage2_rescore_top=STAGE2_RESCORE_TOP,
     stage2_K=STAGE2_ROBUST_SAMPLES,
     stage2_mc_reps=STAGE2_MC_REPS,
-    pred_gate_mm=None, pred_gate_quantile=None
+    pred_gate_mm=30.00, pred_gate_quantile=None
 ):
     """Same structure as propose_candidates_BO, but objective = *mean* ET prediction (mm).
     Final ranking still reported by robust certificate for apples-to-apples comparison."""
@@ -4962,11 +4959,11 @@ def propose_candidates_BO_mean(
 
 bo_df_mean, trace_mean = propose_candidates_BO_mean(
     n_calls=1000, n_random_starts=max(100, 5*len(allowed_idx)),
-    xi=0.02, random_state=SEED, diversity_batch=30, diversity_min_L1_atpct=1.0,
+    xi=0.02, random_state=SEED, diversity_batch=30, diversity_min_L1_atpct=2.0,
     novelty_min_L1_atpct=0.2, novelty_reference="train",
     stage2_rescore_top=STAGE2_RESCORE_TOP,
     stage2_K=STAGE2_ROBUST_SAMPLES, stage2_mc_reps=STAGE2_MC_REPS,
-    pred_gate_mm=20.0, pred_gate_quantile=None
+    pred_gate_mm=30.0, pred_gate_quantile=None
 )
 
 # Overlay best-so-far curves if you also saved the certified trace earlier as bo_trace.csv
@@ -5054,7 +5051,7 @@ if len(at_cols) != len(allowed_elems_present):
 
 dfp["n_active_elems"] = (dfp[at_cols] > active_thresh).sum(axis=1)
 
-def _gate_counts(df, pred_gate_mm=None, pred_gate_quantile=None, max_elems=None):
+def _gate_counts(df, pred_gate_mm=30.00, pred_gate_quantile=None, max_elems=None):
     g = df.copy()
     if pred_gate_quantile is not None:
         qv = float(np.quantile(g["pred_qtau_mm"], pred_gate_quantile))
@@ -5585,16 +5582,17 @@ def _key_from_x(x, eps, K, nd=4):
     return (tuple(np.round(100.0*np.asarray(x,float), nd)), float(eps), int(K))
 
 def eval_robust_L_allowed(x_allowed, eps=ROBUST_EPS, K=ROBUST_SAMPLES, rng=None):
-    """Certified robust lower bound on the allowed simplex; returns L_robust in mm."""
+    assert np.isclose(float(q_robust_hi), Q_ROBUST_HI_FROZEN), \
+        "q_robust_hi drifted from its Cell-28 value."
     if rng is None:
-        rng = np.random.default_rng(SEED+555)
+        rng = np.random.default_rng(SEED + DRIFT_SEED)
     x_allowed = np.asarray(x_allowed, float)
     s = x_allowed.sum()
     x_allowed = x_allowed / s if s > 0 else np.ones_like(x_allowed)/len(x_allowed)
     key = _key_from_x(x_allowed, eps, K)
     if key in _eval_cache:
         return _eval_cache[key]
-    Xj_allowed = jitter_allowed_simplex(x_allowed, eps=eps, K=K, rng=rng)
+    Xj_allowed = sample_drift_neighborhood(x_allowed, eps=eps, K=K, rng=rng)
     Xj_full = embed_allowed_to_full(Xj_allowed)
     feats = make_features_from_compositions(Xj_full)
     qj = np.asarray(cat_qt_hi.predict(feats), float)  # log-quantiles
@@ -6656,7 +6654,7 @@ run_cfg = {
         "n_random_starts": _maybe(50),
         "xi": _maybe(0.02),
         "diversity_batch": _maybe(30),
-        "diversity_min_L1_atpct": _maybe(1.0),
+        "diversity_min_L1_atpct": _maybe(2.0),
         "hard_caps": _maybe(hard_caps) if "hard_caps" in globals() else None,
         "max_elements": _maybe(max_elements) if "max_elements" in globals() else None,
     },
@@ -6920,7 +6918,7 @@ print("Figure helpers ready:",
 
 
 # Reliability figures
-robust_label = f"Robust (±{ROBUST_EPS*100:.0f} at.%)"
+robust_label = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"
 
 bounds = {}
 if "L_marginal_mm" in globals():  bounds["Marginal"]        = np.asarray(L_marginal_mm,  float)
@@ -7099,7 +7097,7 @@ if "METHOD_COLORS" not in globals():
         "Shift-weighted": "#2ca02c",
     }
 
-robust_label = f"Robust (±{ROBUST_EPS*100:.0f} at.%)"
+robust_label = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"
 bounds = {}
 if "L_marginal_mm" in globals():  bounds["Marginal"]        = np.asarray(L_marginal_mm,  float)
 if "L_group_mm"    in globals():  bounds["Group-cond."]     = np.asarray(L_group_mm,     float)
@@ -8232,7 +8230,7 @@ print("Saved CSVs:",
 
 #  Coverage vs TRUE Dmax bins (marginal & robust, with CIs, NaN-safe)
 y_true_mm = np.exp(y_test)
-robust_label = f"Robust (±{ROBUST_EPS*100:.0f} at.%)" if 'ROBUST_EPS' in globals() else "Robust"
+robust_label = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)" if 'ROBUST_EPS' in globals() else "Robust"
 
 methods = {}
 if 'L_marginal_mm' in globals(): methods["Marginal"] = L_marginal_mm
@@ -8355,7 +8353,7 @@ print("Saved:",
 
 
 # L (robust) vs truth; mark uncovered
-robust_label = f"Robust (±{ROBUST_EPS*100:.0f} at.%)" if 'ROBUST_EPS' in globals() else "Robust"
+robust_label = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)" if 'ROBUST_EPS' in globals() else "Robust"
 
 if 'L_robust_mm' in globals():
     Lr_full = np.asarray(L_robust_mm, float)
@@ -8799,7 +8797,7 @@ FRACTIONS = [0.2, 0.4, 0.6, 0.8, 1.0]
 R_REP     = 7
 DSTAR     = 5.0
 TAU_USED  = (QT_TAU_HIGH if 'QT_TAU_HIGH' in globals() else QT_TAU)
-ROB_LABEL = f"Robust (±{ROBUST_EPS*100:.0f} at.%)"
+ROB_LABEL = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"
 
 def _coverage(y_mm, L_mm):
     m = np.isfinite(y_mm) & np.isfinite(L_mm)
@@ -9093,7 +9091,7 @@ plt.errorbar(dplot["ood_center"], dplot["coverage_marginal"],
              marker="o", capsize=4, label="Marginal")
 
 # Robust
-robust_label = f"Robust (±{ROBUST_EPS*100:.0f} at.%)"
+robust_label = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"
 plt.errorbar(dplot["ood_center"], dplot["coverage_robust"],
              yerr=[dplot["coverage_robust"] - dplot["coverage_robust_lo"],
                    dplot["coverage_robust_hi"] - dplot["coverage_robust"]],
@@ -9293,7 +9291,7 @@ else:
     print(f"[family-out] Loaded: {fo_path}")
 
 # Summary + figures (your original intent)
-robust_label = f"Robust (±{ROBUST_EPS*100:.0f} at.%)"
+robust_label = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"
 order = [
     ("cov_marginal", "Marginal"),
     ("cov_group", "Group-cond."),
@@ -10076,7 +10074,7 @@ methods = []
 if 'L_marginal_mm' in globals(): methods.append(('L_marginal',  L_marginal_mm,  'Marginal'))
 if 'L_group_mm'    in globals(): methods.append(('L_group',     L_group_mm,     'Group-cond.'))
 if 'L_weighted_mm' in globals(): methods.append(('L_weighted',  L_weighted_mm,  'Shift-weighted'))
-if 'L_robust_mm'   in globals(): methods.append(('L_robust',    L_robust_mm,    f"Robust (±{ROBUST_EPS*100:.0f} at.%)"))
+if 'L_robust_mm'   in globals(): methods.append(('L_robust',    L_robust_mm,    f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"))
 
 if not methods:
     raise RuntimeError("No bound arrays found. Expected at least one of L_marginal_mm, L_group_mm, L_weighted_mm, L_robust_mm.")
@@ -10540,7 +10538,7 @@ for fam_name, split in split_family_out.items():
         ("Marginal", Lm, cov_m, lo_m, hi_m, pv_m),
         ("Group-cond.", Lg, cov_g, lo_g, hi_g, pv_g),
         ("Shift-weighted", Lw, cov_w, lo_w, hi_w, pv_w),
-        (f"Robust (±{ROBUST_EPS*100:.0f} at.%)", Lr, cov_r, lo_r, hi_r, pv_r),
+        (f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)", Lr, cov_r, lo_r, hi_r, pv_r),
     ]:
         long_rows.append({
             "family_out": fam_name, "n_test": int(len(te)),
@@ -10571,7 +10569,7 @@ def _apply_fdr(df_wide, df_long, wide_col, long_label):
 _apply_fdr(df_fo, df_fo_long, "p_under_marginal", "Marginal")
 _apply_fdr(df_fo, df_fo_long, "p_under_group", "Group-cond.")
 _apply_fdr(df_fo, df_fo_long, "p_under_weighted", "Shift-weighted")
-_apply_fdr(df_fo, df_fo_long, "p_under_robust", f"Robust (±{ROBUST_EPS*100:.0f} at.%)")
+_apply_fdr(df_fo, df_fo_long, "p_under_robust", f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)")
 
 (OUTDIR / "reports").mkdir(parents=True, exist_ok=True)
 df_fo.to_csv(OUTDIR / "reports" / "family_out_metrics.csv", index=False)
@@ -10600,7 +10598,7 @@ SRC_DIR.mkdir(parents=True, exist_ok=True)
 if 'df_fo' not in globals():
     df_fo = pd.read_csv(OUTDIR / "reports" / "family_out_metrics.csv")
 
-robust_label = f"Robust (±{ROBUST_EPS*100:.0f} at.%)"
+robust_label = f"Drift-robust (ε = {ROBUST_EPS*100:.2f} at.% transferred mass)"
 
 def wilson_ci(k, n, z=1.96):
     if n <= 0:
