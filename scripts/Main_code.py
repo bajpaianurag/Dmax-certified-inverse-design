@@ -87,6 +87,9 @@ THRESHOLDS_MM = tuple(sorted({2.0, 5.0, 7.0, 10.0, 15.0, 20.0}))
 MIN_GROUP_N     = 30
 FAMILY_MIN_TEST = 10
 
+GRID_STEP_ATPCT = 0.5
+GRID_STEP_FRAC  = GRID_STEP_ATPCT / 100.0
+
 (OUTDIR / "reports").mkdir(parents=True, exist_ok=True)
 RUN_INFO = {
     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -520,9 +523,6 @@ with open(OUTDIR / "reports" / "schema.json", "w") as f:
 
 print(json.dumps(schema, indent=2))
 
-
-GRID_STEP_ATPCT = 0.5
-GRID_STEP_FRAC  = GRID_STEP_ATPCT / 100.0
 
 def mean_abs_dev_mean(s):
     s = np.asarray(s, float)
@@ -1330,7 +1330,15 @@ for p in [METRICS_DIR, MODELS_DIR, HPO_DIR]:
     p.mkdir(parents=True, exist_ok=True)
 
 X = X_full
+
+_dm  = pd.to_numeric(df[dmax_col], errors="coerce")
+_bad = (~np.isfinite(_dm)) | (_dm <= 0)
+if _bad.any():
+    print(f"[QC] Dropping {int(_bad.sum())} rows with missing or non-positive Dmax.")
+    df = df.loc[~_bad].reset_index(drop=True)
+
 y_log = np.log(df[dmax_col].astype(float).values)
+assert np.isfinite(y_log).all(), "Non-finite log-Dmax after QC."
 
 idx_train = split_random["train"]; idx_cal = split_random["cal"]; idx_test = split_random["test"]
 X_train, y_train = X.iloc[idx_train], y_log[idx_train]
@@ -1415,7 +1423,7 @@ catb_base = CatBoostRegressor(
     random_seed=SEED,
     verbose=False,
     allow_writing_files=False,
-    thread_count=-1,
+    thread_count=1,
     od_type="Iter",
     od_wait=100
 )
@@ -1958,7 +1966,7 @@ def _make_cat_model_for_tau(tau):
         random_seed=SEED,
         verbose=False,
         allow_writing_files=False,
-        thread_count=-1,
+        thread_count=1,
         **cb_best_params
     )
 
@@ -2192,8 +2200,8 @@ def robust_scores_lower(
     if vectorized:
         J_list = []
         for i in range(n):
-        rng_i = np.random.default_rng(SEED + DRIFT_SEED)
-        Xj = jitter_in_L1_ball_simplex(x, eps=float(eps), K=int(K), rng=rng_i)
+            rng_i = np.random.default_rng(SEED + DRIFT_SEED)
+            Xj = jitter_in_L1_ball_simplex(X_elem[i], eps=float(eps), K=int(K), rng=rng_i)
             # Normalize each jitter (safety)
             rj = Xj.sum(axis=1, keepdims=True)
             Xj = Xj / np.where(rj > 0, rj, 1.0)
@@ -2215,7 +2223,7 @@ def robust_scores_lower(
         if return_min_jitter:
             argmin = np.nanargmin(q_mat, axis=1)
             X_star = np.empty_like(X_elem)
-            off = 0
+
             for i in range(n):
                 X_star[i] = J_list[i][argmin[i]]
                 off += K
@@ -2226,7 +2234,8 @@ def robust_scores_lower(
     S = np.empty(n, dtype=float)
     X_star = np.empty_like(X_elem) if return_min_jitter else None
     for i, (y_i, x_i) in enumerate(zip(y_true_log, X_elem)):
-        Xj = jitter_in_L1_ball_simplex(x_i, eps=eps, K=K, rng=rng)
+        rng_i = np.random.default_rng(SEED + DRIFT_SEED)
+        Xj = jitter_in_L1_ball_simplex(x_i, eps=eps, K=K, rng=rng_i)
         rj = Xj.sum(axis=1, keepdims=True)
         Xj = Xj / np.where(rj > 0, rj, 1.0)
         feats = make_features_from_compositions(Xj)
@@ -2370,8 +2379,13 @@ def adversarial_min_with_report(model, x0, eps, *, step=ADV_STEP, max_iters=ADV_
     # One extra local neighborhood scan to test stationarity
     x = x_star.copy()
     d = x.size
-    donors    = np.argsort(-x)[:min(topk, d)]
-    receivers = np.argsort(x) [:min(max(topk,2), d)]
+    supp      = np.where(x > 1e-12)[0]
+    if supp.size < 2:
+        return q_min, x_star, {"eps": float(eps), "step": float(step), "topk": int(topk),
+                               "q_min": float(q_min), "stationary": True,
+                               "best_improve": 0.0, "gap_proxy": 0.0}
+    donors    = supp[np.argsort(-x[supp])][:min(topk, supp.size)]
+    receivers = supp[np.argsort( x[supp])][:min(max(topk, 2), supp.size)]
     cands = []
     for i in donors:
         if x[i] <= 1e-12: 
@@ -2477,7 +2491,7 @@ cb_hi_base = CatBoostRegressor(
     random_seed=SEED,
     verbose=False,
     allow_writing_files=False,
-    thread_count=-1,
+    thread_count=1,
     od_type="Iter",
     od_wait=100
 )
@@ -2844,7 +2858,7 @@ if True:
         random_seed=SEED + 101,
         verbose=False,
         allow_writing_files=False,
-        thread_count=-1,
+        thread_count=1,
         od_type="Iter",
         od_wait=100,
         **_best,
@@ -3889,8 +3903,9 @@ q_marg_all = conformal_qhat(S_marg, ALPHA)
 idx_train = globals().get("idx_train", df.index.difference(idx_cal))
 X_train_full = df.loc[idx_train, elem_cols].to_numpy(float, copy=False)
 nn = NearestNeighbors(n_neighbors=1, metric="manhattan").fit(X_train_full)
-nov_L1_atpct_cal = nn.kneighbors(X_cal_full, 1, return_distance=True)[0].ravel() * 100.0
-nov_bins = pd.cut(nov_L1_atpct_cal, bins=[-0.01,0.5,1.0,2.0,np.inf], labels=["≤0.5","0.5–1.0","1–2",">2 at.%"])
+nov_L1_atpct_cal = nn.kneighbors(X_cal_full, 1, return_distance=True)[0].ravel() * 50.0
+nov_bins = pd.cut(nov_L1_atpct_cal, bins=[-0.01, 2.0, 5.0, 10.0, np.inf],
+                  labels=["≤2", "2–5", "5–10", ">10 at.%"])
 
 # Families
 family_cal = _sig_family_argmax(X_cal_full)
@@ -3914,7 +3929,6 @@ def _jitters_one(x_allowed, eps, K, seed):
     return jitter_allowed_simplex(x_allowed, eps=eps, K=K, rng=rng)
 
 # process in batches to reuse a single predict() call per batch
-processed = 0
 for start in range(0, n_cal, BATCH):
     stop = min(start + BATCH, n_cal)
     Xb = X_cal_allowed[start:stop] 
@@ -3974,7 +3988,7 @@ pd.DataFrame([{"scheme":"novelty","group":k,"q_marg":q_marg_by_nov.get(k,np.nan)
 if 'idx_test' in globals():
     X_test_full = df.loc[idx_test, elem_cols].to_numpy(float, copy=False)
     y_test_log  = np.asarray(y_log)[df.index.get_indexer_for(idx_test)]
-    nov_test    = nn.kneighbors(X_test_full, 1, return_distance=True)[0].ravel() * 100.0
+    nov_test    = nn.kneighbors(X_test_full, 1, return_distance=True)[0].ravel() * 50.0
 
     nov_labels = ["≤0.5","0.5–1.0","1–2",">2 at.%"]
     nov_test_bins = pd.Series(
@@ -4921,7 +4935,7 @@ def propose_candidates_BO_mean(
     ref_mat = {"train": _elem_mat_train, "all": _elem_mat_all, None: None}.get(novelty_reference, _elem_mat_train)
     if ref_mat is not None and getattr(ref_mat, "size", 0):
         nn = NearestNeighbors(n_neighbors=1, metric="manhattan").fit(ref_mat)
-        min_L1_atpct = nn.kneighbors(X_full, 1, return_distance=True)[0].ravel() * 100.0
+        min_L1_atpct = nn.kneighbors(X_full, 1, return_distance=True)[0].ravel() * 50.0
     else:
         min_L1_atpct = np.full(len(eval_X_allowed), np.inf)
 
@@ -7363,7 +7377,7 @@ df_stress = pd.DataFrame(records)
 # ---- Conditional coverage by novelty/family (read the files we just wrote) ----
 X_train_full = df.loc[idx_train, elem_cols].to_numpy(float) if 'idx_train' in globals() else df.loc[:, elem_cols].to_numpy(float)
 nn = NearestNeighbors(n_neighbors=1, metric="manhattan").fit(X_train_full)
-nov_L1_atpct = nn.kneighbors(X_test_elem_full, 1, return_distance=True)[0].ravel() * 100.0
+nov_L1_atpct = nn.kneighbors(X_test_elem_full, 1, return_distance=True)[0].ravel() * 50.0
 nov_bins = pd.cut(nov_L1_atpct, bins=[-0.01, 0.5, 1.0, 2.0, np.inf], labels=["≤0.5","0.5–1.0","1–2",">2 at.%"])
 fam = np.array(elem_cols)[np.argmax(X_test_elem_full, axis=1)]
 cond_df = pd.DataFrame({"idx_test": np.arange(len(X_test_elem_full)), "nov_bin": nov_bins, "family": fam})
@@ -8739,7 +8753,7 @@ def _mk_quantile_estimator(tau, seed):
                 loss_function=f"Quantile:alpha={float(tau)}",
                 eval_metric=f"Quantile:alpha={float(tau)}",
                 random_seed=int(seed),
-                verbose=False, allow_writing_files=False, thread_count=-1
+                verbose=False, allow_writing_files=False, thread_count=1
             )
         except Exception:
             from sklearn.ensemble import GradientBoostingRegressor
@@ -9170,7 +9184,7 @@ if 'mk_quantile_estimator' not in globals():
                 loss_function=f"Quantile:alpha={float(tau)}",
                 eval_metric=f"Quantile:alpha={float(tau)}",
                 random_seed=int(SEED if seed is None else seed),
-                verbose=False, allow_writing_files=False, thread_count=-1
+                verbose=False, allow_writing_files=False, thread_count=1
             )
         except Exception:
             return GradientBoostingRegressor(
@@ -10324,7 +10338,7 @@ for fam_name, split in split_family_out.items():
         random_seed=SEED,
         verbose=False,
         allow_writing_files=False,
-        thread_count=-1
+        thread_count=1
     )
     pin_scorer = make_scorer(mean_pinball_loss, greater_is_better=False, alpha=tau)
 
@@ -11596,7 +11610,7 @@ def make_quantile_estimator(tau):
             loss_function=f"Quantile:alpha={tau}",
             eval_metric=f"Quantile:alpha={tau}",
             random_seed=SEED, verbose=False,
-            allow_writing_files=False, thread_count=-1
+            allow_writing_files=False, thread_count=1
         )
     except Exception:
         return GradientBoostingRegressor(
@@ -11796,7 +11810,7 @@ except NameError:
                 loss_function=f"Quantile:alpha={tau}",
                 eval_metric=f"Quantile:alpha={tau}",
                 random_seed=SEED, verbose=False,
-                allow_writing_files=False, thread_count=-1
+                allow_writing_files=False, thread_count=1
             )
         except Exception:
             return GradientBoostingRegressor(
