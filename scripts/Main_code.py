@@ -31,16 +31,12 @@ import gc
 import matplotlib as mpl
 import joblib, subprocess, platform, datetime as _dt
 from sklearn.metrics import mean_pinball_loss, mean_absolute_error, mean_squared_error, r2_score
-import sys, json, hashlib, platform, datetime as _dt
 from skopt import forest_minimize
 from skopt import gp_minimize
-from skopt.space import Real
-from sklearn.metrics import pairwise_distances
 from sklearn.metrics import average_precision_score, precision_recall_curve
 from sklearn.base import clone
 from sklearn.model_selection import GroupKFold
 from matplotlib import ticker as mticker
-import platform
 from scipy.special import gammaln
 from math import lgamma as _lgamma
 from pandas.api.types import CategoricalDtype
@@ -94,7 +90,7 @@ FAMILY_MIN_TEST = 10
 (OUTDIR / "reports").mkdir(parents=True, exist_ok=True)
 RUN_INFO = {
     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-    "host": platform.node(),
+    "host": .node(),
     "python": sys.version.split()[0],
     "versions": {
         "numpy": np.__version__,
@@ -413,9 +409,9 @@ if missing_syms:
     print(f"PT symbols not present in this dataset: {missing_syms[:20]}{' ...' if len(missing_syms) > 20 else ''}")
 
 
-SUM_TOL = 5e-3
+SUM_TOL = 1e-4
 NEG_TOL = 1e-12 
-FORCE_EXACT_SUM = False
+FORCE_EXACT_SUM = True
 
 df = df_raw.copy()
 
@@ -2368,9 +2364,6 @@ def adversarial_min_with_report(model, x0, eps, *, step=ADV_STEP, max_iters=ADV_
         "gap_proxy": float(gap_proxy),
     }
     return q_min, x_star, trace
-
-
-# In[26]:
 
 
 def robust_scores_lower_dispatch(
