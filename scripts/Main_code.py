@@ -470,6 +470,13 @@ sum_before = df[elem_cols].sum(axis=1)
 n_all_zero = int((sum_before <= 0).sum())
 df = df.loc[sum_before > 0].reset_index(drop=True)
 
+_dm  = pd.to_numeric(df[dmax_col], errors="coerce")
+_bad = (~np.isfinite(_dm)) | (_dm <= 0)
+n_bad_dmax = int(_bad.sum())
+if n_bad_dmax:
+    print(f"[QC] Dropping {n_bad_dmax} rows with missing or non-positive Dmax.")
+    df = df.loc[~_bad].reset_index(drop=True)
+
 sums = df[elem_cols].sum(axis=1)
 need = (sums > 0) & ~sums.between(1.0 - SUM_TOL, 1.0 + SUM_TOL)
 n_rescaled = int(need.sum())
@@ -1330,12 +1337,6 @@ for p in [METRICS_DIR, MODELS_DIR, HPO_DIR]:
     p.mkdir(parents=True, exist_ok=True)
 
 X = X_full
-
-_dm  = pd.to_numeric(df[dmax_col], errors="coerce")
-_bad = (~np.isfinite(_dm)) | (_dm <= 0)
-if _bad.any():
-    print(f"[QC] Dropping {int(_bad.sum())} rows with missing or non-positive Dmax.")
-    df = df.loc[~_bad].reset_index(drop=True)
 
 y_log = np.log(df[dmax_col].astype(float).values)
 assert np.isfinite(y_log).all(), "Non-finite log-Dmax after QC."
@@ -3474,6 +3475,7 @@ assert "q_robust_hi" in globals() and np.isfinite(q_robust_hi), \
 assert "Q_ROBUST_HI_FROZEN" in globals() and np.isclose(float(q_robust_hi), Q_ROBUST_HI_FROZEN), \
     "q_robust_hi was modified after Cell 28."
 
+_assert_cp_frozen()
 S_cal_rob = np.maximum(0.0, np.nan_to_num(np.asarray(S_cal_hi_rob, float), nan=0.0))
 print(f"[CP] Using frozen q_robust_hi = {q_robust_hi:.6f} (set in Cell 28)")
 
@@ -3869,11 +3871,8 @@ if 'embed_allowed_to_full' not in globals():
 assert "sample_drift_neighborhood" in globals(), \
     "Run the canonical drift-sampler cell (In[4]) first."
 
-
-# In[46]:
-
-
 # Mondrian (stratified) calibration: by family and novelty bins
+_assert_cp_frozen()
 print("[Calib] Starting Mondrian (stratified) calibration by family & novelty...")
 
 # Preconditions
@@ -3990,9 +3989,9 @@ if 'idx_test' in globals():
     y_test_log  = np.asarray(y_log)[df.index.get_indexer_for(idx_test)]
     nov_test    = nn.kneighbors(X_test_full, 1, return_distance=True)[0].ravel() * 50.0
 
-    nov_labels = ["≤0.5","0.5–1.0","1–2",">2 at.%"]
+    nov_labels = ["≤2", "2–5", "5–10", ">10 at.%"]
     nov_test_bins = pd.Series(
-        pd.cut(nov_test, bins=[-0.01, 0.5, 1.0, 2.0, np.inf], labels=nov_labels),
+        pd.cut(nov_test, bins=[-0.01, 2.0, 5.0, 10.0, np.inf], labels=nov_labels),
         index=np.arange(len(nov_test))
     ).astype(str)
 
@@ -4024,10 +4023,7 @@ if 'idx_test' in globals():
     plt.savefig(out/"fig_coverage_by_novelty_test.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-
-# In[47]:
-
-
+_assert_cp_frozen()
 # Inverse design — tree surrogate + two-stage robustness
 _required = ["df","elem_cols","SEED","ROBUST_EPS","ROBUST_SAMPLES","cat_qt_hi","q_robust_hi","make_features_from_compositions"]
 for _k in _required:
@@ -4047,6 +4043,7 @@ if 'idx_train' in globals():
     _elem_mat_train = df.loc[idx_train, elem_cols].to_numpy(dtype=float, copy=False)
 else:
     _elem_mat_train = _elem_mat_all
+
 
 # Stage-1 vs Stage-2 robustness settings
 STAGE1_ROBUST_SAMPLES = int(ROBUST_SAMPLES)
@@ -5588,6 +5585,7 @@ def _cand_allowed_matrix(df_rows):
     return np.vstack(mats) if mats else np.zeros((0, len(allowed_elems_present)), float)
 
 # Small cache to speed up repeated evals during tornado
+_assert_cp_frozen()
 _eval_cache = {}
 def _key_from_x(x, eps, K, nd=4):
     return (tuple(np.round(100.0*np.asarray(x,float), nd)), float(eps), int(K))
@@ -5715,10 +5713,8 @@ for i in range(min(N_TOP_TORNADO, len(cand_source))):
 print(f"Saved {min(N_TOP_TORNADO, len(cand_source))} tornado CSVs to {SRC_DIR} and figures to {FIGDIR}.")
 
 
-# In[58]:
-
-
 # Risk-controlled shortlist & diversity
+_assert_cp_frozen()
 try:
     display
 except NameError:
@@ -5953,10 +5949,8 @@ if 'delta_size_mismatch' not in globals():
         return 100.0 * np.sqrt(float((w * ((1.0 - r / rbar) ** 2)).sum()))
 
 
-# In[60]:
-
-
 # Certified minimal-edit recourse 
+_assert_cp_frozen()
 FIGDIR = OUTDIR / "reports" / "figures"
 SRC_DIR = OUTDIR / "source_data"
 for p in (FIGDIR, SRC_DIR): p.mkdir(parents=True, exist_ok=True)
@@ -7378,7 +7372,7 @@ df_stress = pd.DataFrame(records)
 X_train_full = df.loc[idx_train, elem_cols].to_numpy(float) if 'idx_train' in globals() else df.loc[:, elem_cols].to_numpy(float)
 nn = NearestNeighbors(n_neighbors=1, metric="manhattan").fit(X_train_full)
 nov_L1_atpct = nn.kneighbors(X_test_elem_full, 1, return_distance=True)[0].ravel() * 50.0
-nov_bins = pd.cut(nov_L1_atpct, bins=[-0.01, 0.5, 1.0, 2.0, np.inf], labels=["≤0.5","0.5–1.0","1–2",">2 at.%"])
+nov_bins = pd.cut(nov_L1_atpct, bins=[-0.01, 2.0, 5.0, 10.0, np.inf], labels=["≤2", "2–5", "5–10", ">10 at.%"])
 fam = np.array(elem_cols)[np.argmax(X_test_elem_full, axis=1)]
 cond_df = pd.DataFrame({"idx_test": np.arange(len(X_test_elem_full)), "nov_bin": nov_bins, "family": fam})
 
