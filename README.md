@@ -20,6 +20,8 @@ This repository packages **scripts** for robust, conformal, Bayesian optimizatio
 ## Repository layout
 
 ```
+Final_MMG_Dmax_dataset.csv  # Initial BMG dataset for Dmax in mm
+
 scripts/
   Main_code.py            # training + calibration and core utilities + inverse design
 
